@@ -58,4 +58,5 @@ export type ShellServerMessage =
   | { type: 'ready' }
   | { type: 'output'; data: string }
   | { type: 'exit'; code: number }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'cwd'; cwd: string };

@@ -52,6 +52,8 @@ class Strings {
   final String shellSearchNoMatch;
   final String shellSearchHitCountTpl; // {n} of {total}
   final String shellSearchCaseSensitive;
+  final String shellCwdCopied;
+  final String shellCwdCopyTooltip;
 
   // Files / Git placeholders
   final String filesComingSoon;
@@ -213,6 +215,8 @@ class Strings {
     required this.shellSearchNoMatch,
     required this.shellSearchHitCountTpl,
     required this.shellSearchCaseSensitive,
+    required this.shellCwdCopied,
+    required this.shellCwdCopyTooltip,
     required this.filesComingSoon,
     required this.gitComingSoon,
     required this.gitStageAll,
@@ -350,6 +354,8 @@ const Strings stringsEn = Strings(
   shellSearchNoMatch: 'No matches',
   shellSearchHitCountTpl: '{n} of {total}',
   shellSearchCaseSensitive: 'Aa',
+  shellCwdCopied: 'Path copied',
+  shellCwdCopyTooltip: 'Copy path',
   filesComingSoon: 'Files (coming soon)',
   gitComingSoon: 'Git diff / stage / commit (coming soon)',
   gitStageAll: 'Stage All',
@@ -491,6 +497,8 @@ const Strings stringsZh = Strings(
   shellSearchNoMatch: '无匹配',
   shellSearchHitCountTpl: '第 {n} / {total}',
   shellSearchCaseSensitive: 'Aa',
+  shellCwdCopied: '路径已复制',
+  shellCwdCopyTooltip: '复制路径',
   filesComingSoon: '文件树（即将上线）',
   gitComingSoon: 'Git 差异 / 暂存 / 提交（即将上线）',
   gitStageAll: '全部暂存',

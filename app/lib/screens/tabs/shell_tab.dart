@@ -10,6 +10,7 @@ import '../../i18n/locale_provider.dart';
 import '../../state/projects_store.dart';
 import '../../state/server_config.dart';
 import '../../theme.dart';
+import 'shell_cwd_bar.dart';
 import 'shell_search_bar.dart';
 
 class ShellTab extends ConsumerStatefulWidget {
@@ -98,6 +99,13 @@ class _ShellTabState extends ConsumerState<ShellTab> {
         break;
       case 'output':
         _terminal?.write(msg['data'] as String);
+        break;
+      case 'cwd':
+        // 服务端从 PTY 输出嗅探到的 OSC 7 cwd（用户 cd 后实时跟随）
+        final newCwd = msg['cwd'] as String?;
+        if (newCwd != null && newCwd.isNotEmpty && newCwd != _connectedCwd) {
+          setState(() => _connectedCwd = newCwd);
+        }
         break;
       case 'exit':
         _terminal?.write('\r\n[process exited ${msg['code']}]\r\n');
@@ -206,6 +214,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
               ],
             ),
           ),
+        ShellCwdBar(cwd: _connectedCwd ?? session.cwd),
         if (_searching)
           ShellSearchBar(
             terminal: _terminal!,
