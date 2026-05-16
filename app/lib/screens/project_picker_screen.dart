@@ -1,0 +1,1148 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart';
+
+import '../api/projects_api.dart';
+import '../api/sessions_api.dart';
+import '../state/projects_store.dart';
+import '../state/server_config.dart';
+import '../theme.dart';
+import 'add_project_sheet.dart';
+import 'main_shell.dart';
+
+class ProjectPickerScreen extends ConsumerStatefulWidget {
+  const ProjectPickerScreen({super.key});
+
+  @override
+  ConsumerState<ProjectPickerScreen> createState() => _ProjectPickerScreenState();
+}
+
+enum _PhaseStatus { connecting, ready, failed }
+
+class _ProjectPickerScreenState extends ConsumerState<ProjectPickerScreen> {
+  final Set<String> _expanded = {};
+  _PhaseStatus _phase = _PhaseStatus.connecting;
+  String? _connectError;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkConnection();
+  }
+
+  Future<void> _checkConnection() async {
+    final conn = ref.read(activeConnectionProvider);
+    if (conn == null) return;
+    setState(() {
+      _phase = _PhaseStatus.connecting;
+      _connectError = null;
+    });
+    final start = DateTime.now();
+    try {
+      final resp = await http
+          .get(Uri.parse('${conn.httpBase}/health'))
+          .timeout(const Duration(seconds: 8));
+      // 保证最少 500ms 的连接动画，避免一闪而过
+      final elapsed = DateTime.now().difference(start);
+      if (elapsed < const Duration(milliseconds: 500)) {
+        await Future.delayed(const Duration(milliseconds: 500) - elapsed);
+      }
+      if (!mounted) return;
+      if (resp.statusCode == 200) {
+        setState(() => _phase = _PhaseStatus.ready);
+      } else {
+        setState(() {
+          _connectError = '服务端返回 ${resp.statusCode}';
+          _phase = _PhaseStatus.failed;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _connectError = '无法连接，请检查地址和网络';
+        _phase = _PhaseStatus.failed;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final conn = ref.watch(activeConnectionProvider)!;
+    final t = AppTokens.of(context);
+
+    return Scaffold(
+      body: SafeArea(
+        bottom: false,
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 280),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          child: _phase == _PhaseStatus.ready
+              ? _readyView(context, conn, t)
+              : _connectingView(context, conn, t),
+        ),
+      ),
+    );
+  }
+
+  Widget _connectingView(BuildContext context, ServerEntry conn, AppTokens t) {
+    return _ConnectingView(
+      key: const ValueKey('connecting'),
+      conn: conn,
+      error: _phase == _PhaseStatus.failed ? _connectError : null,
+      onBack: () => Navigator.of(context).pop(),
+      onRetry: _checkConnection,
+    );
+  }
+
+  Widget _readyView(BuildContext context, ServerEntry conn, AppTokens t) {
+    final projectsAsync = ref.watch(projectsProvider);
+    return Column(
+      key: const ValueKey('ready'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _TopBar(
+          conn: conn,
+          onRefresh: () {
+            ref.invalidate(projectsProvider);
+            for (final p in _expanded) { ref.invalidate(sessionsProvider(p)); }
+          },
+          onAdd: () => _showAddSheet(context),
+        ),
+        Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
+        Expanded(
+          child: projectsAsync.when(
+            loading: () => const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+            error: (e, _) => _ErrorState(
+              message: e.toString(),
+              onRetry: () => ref.invalidate(projectsProvider),
+            ),
+            data: (projects) => _ProjectList(
+              projects: projects,
+              expanded: _expanded,
+              onToggle: (path) => setState(() {
+                if (_expanded.contains(path)) {
+                  _expanded.remove(path);
+                } else {
+                  _expanded.add(path);
+                }
+              }),
+              onNewSession: _enterProject,
+              onPickSession: _enterProjectWithSession,
+              onAdd: () => _showAddSheet(context),
+              onDelete: _confirmAndDelete,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _enterProject(Project project) {
+    ref.read(selectedProjectProvider.notifier).state = project;
+    ref.read(currentSessionProvider.notifier).state =
+        CurrentSession(cwd: project.path, label: project.name);
+    Navigator.of(context).push(
+      CupertinoPageRoute(builder: (_) => const MainShell()),
+    );
+  }
+
+  void _enterProjectWithSession(Project project, SessionSummary session) {
+    ref.read(selectedProjectProvider.notifier).state = project;
+    ref.read(currentSessionProvider.notifier).state = CurrentSession(
+      cwd: project.path,
+      label: '${project.name} · ${session.displayTitle}',
+      resumeId: session.sessionId,
+    );
+    Navigator.of(context).push(
+      CupertinoPageRoute(builder: (_) => const MainShell()),
+    );
+  }
+
+  void _showAddSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => AddProjectSheet(onAdded: () => ref.invalidate(projectsProvider)),
+    );
+  }
+
+  Future<void> _confirmAndDelete(Project project) async {
+    final t = AppTokens.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: t.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('移除项目', style: TextStyle(fontSize: 16, color: t.text)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '将从项目列表中移除：',
+              style: TextStyle(fontSize: 13, color: t.textMuted),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: t.surfaceHi,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: t.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(project.name,
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: t.text)),
+                  const SizedBox(height: 2),
+                  Text(
+                    project.path.replaceFirst(RegExp(r'^/Users/[^/]+'), '~'),
+                    style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: t.textDim),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: t.accent.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: t.accent.withValues(alpha: 0.18)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.shield_outlined, size: 14, color: t.accent),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '会话历史不会删除，仍保存在服务端。',
+                      style: TextStyle(fontSize: 11, color: t.accent, height: 1.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('取消', style: TextStyle(color: t.textMuted)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: t.error),
+            child: const Text('移除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final conn = ref.read(activeConnectionProvider);
+    if (conn == null) return;
+    try {
+      await ProjectsApi(conn.httpBase).removeProject(project.path);
+      ref.invalidate(projectsProvider);
+      // 如果当前会话用的就是这个项目，清理一下
+      final current = ref.read(currentSessionProvider);
+      if (current?.cwd == project.path) {
+        ref.read(currentSessionProvider.notifier).state = null;
+        ref.read(selectedProjectProvider.notifier).state = null;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('移除失败：$e')),
+      );
+    }
+  }
+}
+
+// ── Connecting / failed view ──────────────────────────────────
+
+class _ConnectingView extends StatefulWidget {
+  final ServerEntry conn;
+  final String? error;
+  final VoidCallback onBack;
+  final VoidCallback onRetry;
+  const _ConnectingView({
+    super.key,
+    required this.conn,
+    required this.error,
+    required this.onBack,
+    required this.onRetry,
+  });
+
+  @override
+  State<_ConnectingView> createState() => _ConnectingViewState();
+}
+
+class _ConnectingViewState extends State<_ConnectingView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final isError = widget.error != null;
+    final cleanUrl =
+        widget.conn.url.replaceFirst(RegExp(r'^https?://'), '');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 顶部只保留一个返回按钮
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 6, 8, 4),
+          child: Row(
+            children: [
+              IconButton(
+                icon: Icon(Icons.arrow_back_ios_new, size: 18, color: t.textMuted),
+                onPressed: widget.onBack,
+                tooltip: '返回',
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 服务器图标 + 转圈光环
+                  SizedBox(
+                    width: 110,
+                    height: 110,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        if (!isError)
+                          AnimatedBuilder(
+                            animation: _ctrl,
+                            builder: (_, __) => CustomPaint(
+                              size: const Size(110, 110),
+                              painter: _RingPainter(
+                                progress: _ctrl.value,
+                                color: t.accent,
+                              ),
+                            ),
+                          ),
+                        Container(
+                          width: 72,
+                          height: 72,
+                          decoration: BoxDecoration(
+                            color: isError ? t.error.withValues(alpha: 0.08) : t.accentSubt,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: isError
+                                  ? t.error.withValues(alpha: 0.3)
+                                  : t.accent.withValues(alpha: 0.25),
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(widget.conn.emoji, style: const TextStyle(fontSize: 36)),
+                          ),
+                        ),
+                        if (isError)
+                          Positioned(
+                            right: 14,
+                            bottom: 14,
+                            child: Container(
+                              width: 22, height: 22,
+                              decoration: BoxDecoration(
+                                color: t.error,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: t.bg, width: 2),
+                              ),
+                              child: const Icon(Icons.close, size: 13, color: Colors.white),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  Text(
+                    isError ? '连接失败' : '正在连接到',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: t.textMuted,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    widget.conn.name,
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      color: t.text,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    cleanUrl,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                      color: t.textDim,
+                    ),
+                  ),
+                  if (isError) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: t.error.withValues(alpha: 0.08),
+                        border: Border.all(color: t.error.withValues(alpha: 0.25)),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        widget.error!,
+                        style: TextStyle(fontSize: 12, color: t.error),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        OutlinedButton(
+                          onPressed: widget.onBack,
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                            side: BorderSide(color: t.border),
+                            foregroundColor: t.textMuted,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                          child: const Text('返回'),
+                        ),
+                        const SizedBox(width: 12),
+                        FilledButton.icon(
+                          onPressed: widget.onRetry,
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: const Text('重试'),
+                          style: FilledButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+  _RingPainter({required this.progress, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2 - 2;
+
+    // 背景环
+    final bg = Paint()
+      ..color = color.withValues(alpha: 0.12)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawCircle(center, radius, bg);
+
+    // 旋转弧
+    final fg = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5
+      ..strokeCap = StrokeCap.round;
+    final start = progress * 2 * 3.14159265;
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      start,
+      1.4,
+      false,
+      fg,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _RingPainter old) => old.progress != progress;
+}
+
+// ── Top bar ──────────────────────────────────────────────────
+
+class _TopBar extends StatelessWidget {
+  final ServerEntry conn;
+  final VoidCallback onRefresh;
+  final VoidCallback onAdd;
+  const _TopBar({required this.conn, required this.onRefresh, required this.onAdd});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
+      child: Row(
+        children: [
+          // Back button: emoji + back arrow
+          InkWell(
+            onTap: () => Navigator.of(context).pop(),
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.arrow_back_ios_new, size: 15, color: t.accent),
+                  const SizedBox(width: 4),
+                  Text(conn.emoji, style: const TextStyle(fontSize: 18)),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  conn.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: t.text,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                Text(
+                  conn.url.replaceFirst(RegExp(r'^https?://'), ''),
+                  style: TextStyle(fontSize: 10, color: t.textDim, fontFamily: 'monospace'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(Icons.refresh, size: 20, color: t.textMuted),
+            onPressed: onRefresh,
+            tooltip: '刷新',
+          ),
+          GestureDetector(
+            onTap: onAdd,
+            child: Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: t.accentSubt,
+                border: Border.all(color: t.accent.withValues(alpha: 0.3)),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(Icons.add, size: 18, color: t.accent),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Project list ─────────────────────────────────────────────
+
+class _ProjectList extends ConsumerWidget {
+  final List<Project> projects;
+  final Set<String> expanded;
+  final void Function(String path) onToggle;
+  final void Function(Project) onNewSession;
+  final void Function(Project, SessionSummary) onPickSession;
+  final VoidCallback onAdd;
+  final void Function(Project) onDelete;
+
+  const _ProjectList({
+    required this.projects,
+    required this.expanded,
+    required this.onToggle,
+    required this.onNewSession,
+    required this.onPickSession,
+    required this.onAdd,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = AppTokens.of(context);
+    if (projects.isEmpty) return _EmptyState(onAdd: onAdd);
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10, left: 2),
+          child: Text(
+            'PROJECTS',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: t.textDim,
+              letterSpacing: 0.7,
+            ),
+          ),
+        ),
+        for (final p in projects)
+          Slidable(
+            key: ValueKey(p.path),
+            groupTag: 'project-cards',
+            endActionPane: ActionPane(
+              motion: const DrawerMotion(),
+              extentRatio: 0.22,
+              children: [
+                SlidableAction(
+                  onPressed: (_) => onDelete(p),
+                  backgroundColor: const Color(0xFFEF4444),
+                  foregroundColor: Colors.white,
+                  icon: Icons.delete_outline,
+                  label: '移除',
+                  borderRadius: BorderRadius.circular(16),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                ),
+              ],
+            ),
+            child: _ProjectCard(
+              project: p,
+              isExpanded: expanded.contains(p.path),
+              onToggle: () => onToggle(p.path),
+              onNewSession: () => onNewSession(p),
+              onPickSession: (s) => onPickSession(p, s),
+              onDelete: () => onDelete(p),
+            ),
+          ),
+        const SizedBox(height: 8),
+        _AddCard(onTap: onAdd),
+      ],
+    );
+  }
+}
+
+// ── Project card (expandable) ─────────────────────────────────
+
+class _ProjectCard extends ConsumerWidget {
+  final Project project;
+  final bool isExpanded;
+  final VoidCallback onToggle;
+  final VoidCallback onNewSession;
+  final void Function(SessionSummary) onPickSession;
+  final VoidCallback onDelete;
+
+  const _ProjectCard({
+    required this.project,
+    required this.isExpanded,
+    required this.onToggle,
+    required this.onNewSession,
+    required this.onPickSession,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = AppTokens.of(context);
+    final sessionsAsync =
+        isExpanded ? ref.watch(sessionsProvider(project.path)) : null;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: t.surface,
+        border: Border.all(
+          color: isExpanded ? t.accent.withValues(alpha: 0.28) : t.border,
+        ),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      clipBehavior: Clip.hardEdge,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: isExpanded ? t.accentSubt : t.surfaceHi,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: isExpanded
+                            ? t.accent.withValues(alpha: 0.2)
+                            : t.border,
+                      ),
+                    ),
+                    child: Center(
+                      child: Icon(
+                        isExpanded ? Icons.folder_open : Icons.folder_outlined,
+                        size: 20,
+                        color: isExpanded ? t.accent : t.textMuted,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 2),
+                        Text(
+                          project.name,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: isExpanded ? t.accent : t.text,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _humanPath(project.path),
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: t.textDim,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  // 一个表达力清晰的"折叠/展开"指示：旋转的 chevron。
+                  // 三个点菜单只在展开状态露出，避免视觉拥挤。
+                  AnimatedRotation(
+                    duration: const Duration(milliseconds: 180),
+                    turns: isExpanded ? 0.5 : 0,
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Icon(Icons.expand_more, size: 20, color: t.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          if (isExpanded) ...[
+            Divider(color: t.borderSubt, height: 0.5, indent: 14, endIndent: 14),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _ActionChip(
+                      icon: Icons.add_comment_outlined,
+                      label: '新对话',
+                      primary: true,
+                      onTap: onNewSession,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _IconAction(
+                    icon: Icons.delete_outline,
+                    color: t.error,
+                    tooltip: '从列表移除',
+                    onTap: onDelete,
+                  ),
+                ],
+              ),
+            ),
+            if (sessionsAsync != null)
+              sessionsAsync.when(
+                loading: () => const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  child: Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                ),
+                error: (e, _) => Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    '载入失败：$e',
+                    style: TextStyle(fontSize: 11, color: t.error),
+                  ),
+                ),
+                data: (sessions) => sessions.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
+                        child: Text(
+                          '暂无历史 session',
+                          style: TextStyle(fontSize: 12, color: t.textDim),
+                        ),
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+                            child: Text(
+                              '历史 SESSION',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: t.textDim,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ),
+                          for (final s in sessions.take(6))
+                            _SessionRow(session: s, onTap: () => onPickSession(s)),
+                          const SizedBox(height: 6),
+                        ],
+                      ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _humanPath(String path) =>
+      path.replaceFirst(RegExp(r'^/Users/[^/]+'), '~');
+}
+
+class _SessionRow extends StatelessWidget {
+  final SessionSummary session;
+  final VoidCallback onTap;
+  const _SessionRow({required this.session, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final ts = session.lastModified;
+    final timeText = ts == null
+        ? ''
+        : DateFormat('MM-dd HH:mm')
+            .format(DateTime.fromMillisecondsSinceEpoch(ts));
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 9, 14, 9),
+        child: Row(
+          children: [
+            Container(
+              width: 3,
+              height: 24,
+              margin: const EdgeInsets.only(right: 10),
+              decoration: BoxDecoration(
+                color: t.border,
+                borderRadius: BorderRadius.circular(1.5),
+              ),
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    session.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13, color: t.text),
+                  ),
+                  if (timeText.isNotEmpty)
+                    Text(
+                      timeText,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: t.textDim,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, size: 16, color: t.textDim),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 一个只显示图标的次要操作按钮，与 _ActionChip 同高，用于"移除"这类
+/// 不应当抢眼但需要可达的操作。
+class _IconAction extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String tooltip;
+  final VoidCallback onTap;
+  const _IconAction({
+    required this.icon,
+    required this.color,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            border: Border.all(color: t.border),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, size: 16, color: color.withValues(alpha: 0.8)),
+        ),
+      ),
+    );
+  }
+}
+
+class _ActionChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool primary;
+  final VoidCallback onTap;
+  const _ActionChip(
+      {required this.icon,
+      required this.label,
+      required this.primary,
+      required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: primary ? t.accentSubt : null,
+          border: Border.all(
+            color: primary ? t.accent.withValues(alpha: 0.22) : t.border,
+          ),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 15, color: primary ? t.accent : t.textMuted),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: primary ? t.accent : t.textMuted,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AddCard extends StatelessWidget {
+  final VoidCallback onTap;
+  const _AddCard({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: CustomPaint(
+        painter: _DashedBorderPainter(color: t.textDim.withValues(alpha: 0.35)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 18),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.create_new_folder_outlined, size: 18, color: t.textDim),
+              const SizedBox(width: 8),
+              Text(
+                '添加项目目录',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: t.textDim,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashedBorderPainter extends CustomPainter {
+  final Color color;
+  const _DashedBorderPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+    const r = 16.0;
+    final rrect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(0.75, 0.75, size.width - 1.5, size.height - 1.5),
+      const Radius.circular(r),
+    );
+    final path = Path()..addRRect(rrect);
+    canvas.drawPath(_dashPath(path), paint);
+  }
+
+  Path _dashPath(Path source) {
+    final dest = Path();
+    for (final metric in source.computeMetrics()) {
+      double dist = 0;
+      bool draw = true;
+      while (dist < metric.length) {
+        final len = draw ? 6.0 : 4.0;
+        if (draw) dest.addPath(metric.extractPath(dist, dist + len), Offset.zero);
+        dist += len;
+        draw = !draw;
+      }
+    }
+    return dest;
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedBorderPainter old) => old.color != color;
+}
+
+// ── Empty / error states ──────────────────────────────────────
+
+class _EmptyState extends StatelessWidget {
+  final VoidCallback onAdd;
+  const _EmptyState({required this.onAdd});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: t.surface,
+                border: Border.all(color: t.border),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child:
+                  const Center(child: Text('📁', style: TextStyle(fontSize: 32))),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              '还没有项目',
+              style: TextStyle(
+                  fontSize: 17, fontWeight: FontWeight.w600, color: t.text),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '添加一个工作目录，\n就能用 Claude 控制这台机器了。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: t.textMuted, height: 1.7),
+            ),
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('添加项目目录'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorState extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  const _ErrorState({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.error_outline, color: t.error, size: 32),
+            const SizedBox(height: 12),
+            Text(
+              '获取项目列表失败',
+              style: TextStyle(
+                  color: t.text, fontSize: 15, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Text(message,
+                style: TextStyle(color: t.textMuted, fontSize: 12),
+                textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            OutlinedButton(onPressed: onRetry, child: const Text('重试')),
+          ],
+        ),
+      ),
+    );
+  }
+}

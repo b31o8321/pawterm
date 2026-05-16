@@ -3,8 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../api/sessions_api.dart';
-import '../screens/git_page.dart';
+import '../i18n/locale_provider.dart';
 import '../screens/connections_screen.dart';
+import '../screens/git_page.dart';
+import '../screens/settings_screen.dart';
 import '../state/projects_store.dart';
 import '../theme.dart';
 
@@ -21,6 +23,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
     final projectsAsync = ref.watch(projectsProvider);
     final session = ref.watch(currentSessionProvider);
 
@@ -32,7 +35,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 16, 4),
               child: Text(
-                '工作目录',
+                s.sidebarProjectsTitle,
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w600,
@@ -43,11 +46,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 16, 12),
               child: Text(
-                'Working directories (cwd)',
+                s.sidebarProjectsSubtitle,
                 style: TextStyle(
                   fontSize: 11,
                   color: t.textDim,
-                  fontFamily: 'monospace',
                 ),
               ),
             ),
@@ -59,7 +61,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Text(
-                      '载入失败：$e',
+                      '${s.sidebarLoadFailed}: $e',
                       style: TextStyle(color: t.error, fontSize: 12),
                     ),
                   ),
@@ -68,7 +70,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   if (projects.isEmpty) {
                     return Center(
                       child: Text(
-                        '没有可用项目',
+                        s.sidebarNoProjects,
                         style: TextStyle(color: t.textMuted, fontSize: 13),
                       ),
                     );
@@ -121,7 +123,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
             Divider(color: t.borderSubt, height: 0.5),
             _FooterItem(
               icon: Icons.refresh,
-              label: '刷新',
+              label: s.sidebarRefresh,
               onTap: () {
                 ref.invalidate(projectsProvider);
                 for (final p in _expanded) {
@@ -130,8 +132,17 @@ class _SidebarState extends ConsumerState<Sidebar> {
               },
             ),
             _FooterItem(
-              icon: Icons.settings_outlined,
-              label: '管理连接',
+              icon: Icons.tune,
+              label: s.sidebarSettings,
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                );
+              },
+            ),
+            _FooterItem(
+              icon: Icons.dns_outlined,
+              label: s.sidebarManageConnections,
               onTap: () {
                 Navigator.of(context).pushAndRemoveUntil(
                   MaterialPageRoute(builder: (_) => const ConnectionsScreen()),

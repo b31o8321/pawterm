@@ -1,3 +1,4 @@
+import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import type { WebSocket } from '@fastify/websocket';
@@ -7,6 +8,27 @@ import * as pty from 'node-pty';
 import type { ShellClientMessage, ShellServerMessage } from '@cc/shared';
 
 import { isPathAllowed } from './config.js';
+
+/**
+ * Pick a usable login shell. Order:
+ *   1. msg.shell from client (if exists)
+ *   2. $SHELL env (if exists)
+ *   3. /bin/zsh → /bin/bash → /bin/sh
+ */
+function pickShell(requested: string | undefined): string {
+  const candidates = [
+    requested,
+    process.env.SHELL,
+    '/bin/zsh',
+    '/bin/bash',
+    '/bin/sh',
+  ];
+  for (const c of candidates) {
+    if (c && existsSync(c)) return c;
+  }
+  // Fallback: return /bin/sh even if not found; spawn will produce a clear error.
+  return '/bin/sh';
+}
 
 /**
  * Defense in depth — if a client opens /ws/shell but doesn't send `init`
@@ -83,9 +105,16 @@ export function handleShellSocket(socket: WebSocket, _req: FastifyRequest): void
           try { socket.close(4001, 'forbidden cwd'); } catch { /* ignore */ }
           return;
         }
+        // 校验 cwd 是真实存在的目录，否则 pty.spawn 会以 ENOENT 失败，
+        // 错误消息又非常隐晦（"spawn failed: posix_spawnp failed"）。
+        if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+          send({ type: 'error', message: `cwd not a directory: ${cwd}` });
+          try { socket.close(4003, 'bad cwd'); } catch { /* ignore */ }
+          return;
+        }
         initialized = true;
         clearTimeout(initWatchdog);
-        const shell = msg.shell ?? process.env.SHELL ?? '/bin/zsh';
+        const shell = pickShell(msg.shell);
         try {
           term = spawnPty(cwd, shell, msg.cols, msg.rows);
           term.onData((data) => send({ type: 'output', data }));
@@ -95,7 +124,12 @@ export function handleShellSocket(socket: WebSocket, _req: FastifyRequest): void
           });
           send({ type: 'ready' });
         } catch (err) {
-          send({ type: 'error', message: `spawn failed: ${(err as Error).message}` });
+          const e = err as NodeJS.ErrnoException;
+          const detail = [e.code, e.message].filter(Boolean).join(' · ');
+          send({
+            type: 'error',
+            message: `spawn failed [shell=${shell} cwd=${cwd}] ${detail}`,
+          });
           try { socket.close(4002, 'spawn failed'); } catch { /* ignore */ }
         }
         break;

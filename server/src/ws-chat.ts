@@ -22,9 +22,11 @@ export function handleChatSocket(socket: WebSocket, _req: FastifyRequest): void 
     try {
       for await (const sdkMsg of iter) {
         const wire = messageToWire(sdkMsg);
-        if (wire) send(wire as ChatServerMessage);
-        if (wire && (wire as any).type === 'result') {
-          busy = false;
+        if (wire) {
+          // Tag live messages with server-side wall-clock for accurate display.
+          const stamped = { ...wire, timestamp: Date.now() } as ChatServerMessage;
+          send(stamped);
+          if ((wire as any).type === 'result') busy = false;
         }
       }
     } catch (err) {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -6,14 +7,19 @@ import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../api/protocol.dart';
+import '../../i18n/locale_provider.dart';
+import '../../utils/time_format.dart';
 import '../../state/projects_store.dart';
 import '../../state/server_config.dart';
 import '../../theme.dart';
+import '../../widgets/cc_spinner.dart';
 import '../../widgets/message_view.dart';
 
 class LocalUserInput extends IncomingMessage {
   final String text;
-  LocalUserInput(this.text);
+  final int timestamp;
+  LocalUserInput(this.text, {int? timestamp})
+      : timestamp = timestamp ?? DateTime.now().millisecondsSinceEpoch;
 }
 
 /// In-progress assistant message being built char-by-char from stream deltas.
@@ -36,8 +42,16 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   final ScrollController _scrollController = ScrollController();
   bool _connected = false;
   bool _busy = false;
+  DateTime? _busyStartedAt;
   String? _error;
   String? _boundKey;
+
+  // Stream-mode 状态机（复刻 claude-code Spinner.tsx 的 thinkingStatus 逻辑）
+  CcStreamMode _mode = CcStreamMode.requesting;
+  String? _currentBlockKind;
+  DateTime? _thinkingStartedAt;
+  int? _thoughtSeconds;
+  Timer? _thoughtForTimer;
 
   @override
   void initState() {
@@ -48,6 +62,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _thoughtForTimer?.cancel();
     _channel?.sink.close();
     _textController.dispose();
     _scrollController.dispose();
@@ -145,7 +160,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         final inner = (item as Map<String, dynamic>)['message'];
         if (inner is Map<String, dynamic>) {
           final m = IncomingMessage.fromJson(inner);
-          if (m is AssistantMsg || m is UserMsg) loaded.add(m);
+          // Keep assistant / user / result so historical turns also show duration + cost.
+          if (m is AssistantMsg || m is UserMsg || m is ResultMsg) loaded.add(m);
         }
       }
       if (!mounted) return;
@@ -183,17 +199,36 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         _error = null;
       } else if (msg is ResultMsg) {
         _busy = false;
+        _busyStartedAt = null;
+        _mode = CcStreamMode.requesting;
+        _thoughtForTimer?.cancel();
+        _thoughtSeconds = null;
+        _currentBlockKind = null;
         _messages.add(msg);
       } else if (msg is ErrorMsg) {
         _error = msg.message;
         _messages.add(msg);
       } else if (msg is StreamBlockStart) {
-        if (msg.kind == 'text') {
-          _messages.add(StreamingAssistant());
+        _currentBlockKind = msg.kind;
+        switch (msg.kind) {
+          case 'text':
+            _mode = CcStreamMode.responding;
+            _thoughtForTimer?.cancel();
+            _thoughtSeconds = null;
+            _messages.add(StreamingAssistant());
+            break;
+          case 'thinking':
+            _mode = CcStreamMode.thinking;
+            _thinkingStartedAt = DateTime.now();
+            _thoughtForTimer?.cancel();
+            break;
+          case 'tool_use':
+            _mode = CcStreamMode.toolInput;
+            break;
         }
       } else if (msg is StreamDelta) {
         if (msg.kind == 'text') {
-          // Append to current streaming buffer if exists, else create one.
+          // 追加流式文本；thinking_delta 丢弃（参见 docs/streaming-response.md）。
           final last = _messages.isNotEmpty ? _messages.last : null;
           if (last is StreamingAssistant && !last.stopped) {
             last.text.write(msg.text);
@@ -203,6 +238,25 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           }
         }
       } else if (msg is StreamBlockStop) {
+        // thinking 块结束时进入 "已思考 Xs" 过渡态，至少显示 2 秒。
+        if (_currentBlockKind == 'thinking' && _thinkingStartedAt != null) {
+          final dur = DateTime.now().difference(_thinkingStartedAt!);
+          _thinkingStartedAt = null;
+          _thoughtSeconds = dur.inSeconds.clamp(1, 99999);
+          _mode = CcStreamMode.thoughtFor;
+          _thoughtForTimer?.cancel();
+          _thoughtForTimer = Timer(const Duration(seconds: 2), () {
+            if (!mounted) return;
+            setState(() {
+              // 2 秒后回落到 responding 提示（除非新的 block 已经来）。
+              if (_mode == CcStreamMode.thoughtFor) {
+                _mode = CcStreamMode.responding;
+                _thoughtSeconds = null;
+              }
+            });
+          });
+        }
+        _currentBlockKind = null;
         final last = _messages.isNotEmpty ? _messages.last : null;
         if (last is StreamingAssistant) last.stopped = true;
       } else if (msg is AssistantMsg) {
@@ -235,6 +289,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     setState(() {
       _connected = false;
       _busy = false;
+      _busyStartedAt = null;
       _channel = null;
     });
   }
@@ -256,6 +311,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     setState(() {
       _messages.add(LocalUserInput(text));
       _busy = true;
+      _busyStartedAt = DateTime.now();
+      _mode = CcStreamMode.requesting;
+      _currentBlockKind = null;
+      _thoughtSeconds = null;
+      _thoughtForTimer?.cancel();
       _textController.clear();
     });
     _channel?.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
@@ -269,13 +329,14 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
     final session = ref.watch(currentSessionProvider);
 
     if (session == null) {
       return _EmptyState(
         icon: Icons.chat_bubble_outline,
-        title: '没有进行中的对话',
-        subtitle: '从左上角菜单选择项目，或新建对话',
+        title: s.chatEmptyTitle,
+        subtitle: s.chatEmptyPickProject,
       );
     }
 
@@ -297,8 +358,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           child: _messages.isEmpty
               ? _EmptyState(
                   icon: Icons.send_outlined,
-                  title: _connected ? '开始对话' : '正在连接服务端…',
-                  subtitle: _connected ? '下方输入消息' : null,
+                  title: _connected ? s.chatStartTalking : s.chatConnecting,
+                  subtitle: _connected ? null : null,
                 )
               : ListView.builder(
                   controller: _scrollController,
@@ -306,17 +367,20 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
                   itemCount: _messages.length,
                   itemBuilder: (_, i) {
                     final m = _messages[i];
-                    if (m is LocalUserInput) return _UserMessage(text: m.text);
+                    if (m is LocalUserInput) return _UserMessage(text: m.text, timestamp: m.timestamp);
                     if (m is StreamingAssistant) return _StreamingMessage(buffer: m);
                     return MessageView(message: m);
                   },
                 ),
         ),
-        if (_busy)
-          LinearProgressIndicator(
-            minHeight: 1.5,
-            backgroundColor: t.borderSubt,
+        if (_busy && _busyStartedAt != null)
+          CcSpinnerLine(
+            startedAt: _busyStartedAt!,
+            mode: _mode,
+            thoughtSeconds: _thoughtSeconds,
             color: t.accent,
+            dimColor: t.textDim,
+            onStop: _interrupt,
           ),
         Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
         _Composer(
@@ -412,41 +476,50 @@ class _StatusRow extends StatelessWidget {
   }
 }
 
-class _UserMessage extends StatelessWidget {
+class _UserMessage extends ConsumerWidget {
   final String text;
-  const _UserMessage({required this.text});
+  final int? timestamp;
+  const _UserMessage({required this.text, this.timestamp});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
+    final ts = tsFromMillis(timestamp);
     final maxW = MediaQuery.of(context).size.width * 0.78;
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxW),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: t.accent,
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(14),
-                topRight: Radius.circular(14),
-                bottomLeft: Radius.circular(14),
-                bottomRight: Radius.circular(4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxW),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: t.accent,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(14),
+                  topRight: Radius.circular(14),
+                  bottomLeft: Radius.circular(14),
+                  bottomRight: Radius.circular(4),
+                ),
               ),
-            ),
-            child: SelectableText(
-              text,
-              style: const TextStyle(
-                fontSize: 14,
-                color: Colors.white,
-                height: 1.45,
+              child: SelectableText(
+                text,
+                style: const TextStyle(fontSize: 14, color: Colors.white, height: 1.45),
               ),
             ),
           ),
-        ),
+          if (ts != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, right: 2),
+              child: Text(
+                formatMessageTime(ts, yesterdayLabel: s.timeYesterday),
+                style: TextStyle(fontFamily: 'monospace', fontSize: 10, color: t.textDim),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -540,34 +613,74 @@ class _ModelPicker extends StatelessWidget {
   final void Function(ModelOption) onPick;
   const _ModelPicker({required this.current, required this.onPick});
 
+  Future<void> _openSheet(BuildContext context) async {
+    final t = AppTokens.of(context);
+    final picked = await showModalBottomSheet<ModelOption>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.35),
+      builder: (ctx) => Container(
+        margin: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: t.surface,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: t.border),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 10, bottom: 4),
+                child: Center(
+                  child: Container(
+                    width: 36, height: 4,
+                    decoration: BoxDecoration(color: t.border, borderRadius: BorderRadius.circular(2)),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.auto_awesome_outlined, size: 16, color: t.textMuted),
+                    const SizedBox(width: 8),
+                    Text(
+                      '选择模型',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: t.text,
+                        letterSpacing: -0.1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              for (final m in knownModels) ...[
+                Divider(color: t.borderSubt, height: 0.5, indent: 16, endIndent: 16),
+                _ModelRow(
+                  model: m,
+                  selected: m.id == current.id,
+                  onTap: () => Navigator.of(ctx).pop(m),
+                ),
+              ],
+              const SizedBox(height: 6),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (picked != null) onPick(picked);
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
-    return PopupMenuButton<ModelOption>(
-      tooltip: '切换模型',
-      color: t.surface,
-      offset: const Offset(0, -8),
-      itemBuilder: (_) => knownModels
-          .map(
-            (m) => PopupMenuItem<ModelOption>(
-              value: m,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (m.id == current.id)
-                    Icon(Icons.check, size: 14, color: t.accent)
-                  else
-                    const SizedBox(width: 14),
-                  const SizedBox(width: 8),
-                  Text(m.label, style: TextStyle(color: t.text, fontSize: 13)),
-                  const SizedBox(width: 8),
-                  Text(m.tier, style: TextStyle(color: t.textDim, fontSize: 10, fontFamily: 'monospace')),
-                ],
-              ),
-            ),
-          )
-          .toList(),
-      onSelected: onPick,
+    return InkWell(
+      onTap: () => _openSheet(context),
+      borderRadius: BorderRadius.circular(6),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -587,6 +700,69 @@ class _ModelPicker extends StatelessWidget {
             ),
             const SizedBox(width: 4),
             Icon(Icons.expand_more, size: 14, color: t.textMuted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ModelRow extends StatelessWidget {
+  final ModelOption model;
+  final bool selected;
+  final VoidCallback onTap;
+  const _ModelRow({required this.model, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Row(
+          children: [
+            Container(
+              width: 18, height: 18,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: selected ? t.accent : Colors.transparent,
+                border: Border.all(
+                  color: selected ? t.accent : t.border,
+                  width: 1.5,
+                ),
+              ),
+              child: selected
+                  ? const Icon(Icons.check, size: 11, color: Colors.white)
+                  : null,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    model.label,
+                    style: TextStyle(
+                      color: t.text,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.1,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    model.description,
+                    style: TextStyle(
+                      color: t.textDim,
+                      fontSize: 11.5,
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),

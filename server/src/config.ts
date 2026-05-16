@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, resolve, relative } from 'node:path';
+import { basename, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Project, PermissionMode } from '@cc/shared';
@@ -20,8 +21,9 @@ function expandHome(p: string): string {
   return resolve(p);
 }
 
+export const configPath = process.env.CC_CONFIG ?? resolve(__dirname, '..', 'config.json');
+
 function loadConfig(): ServerSettings {
-  const configPath = process.env.CC_CONFIG ?? resolve(__dirname, '..', 'config.json');
   if (!existsSync(configPath)) {
     console.warn(`[config] No config.json at ${configPath} — defaulting to $HOME`);
     return {
@@ -36,21 +38,58 @@ function loadConfig(): ServerSettings {
     host?: string;
     port?: number;
     permission_mode?: PermissionMode;
-    projects?: Array<{ name: string; path: string }>;
+    projects?: Array<{ name?: string; path: string }>;
   };
 
   return {
     host: raw.host ?? '0.0.0.0',
     port: raw.port ?? 8765,
     permissionMode: raw.permission_mode ?? 'acceptEdits',
-    projects: (raw.projects ?? []).map((p) => ({
-      name: p.name,
-      path: expandHome(p.path),
-    })),
+    projects: (raw.projects ?? []).map((p) => {
+      const path = expandHome(p.path);
+      return { name: p.name?.trim() || basename(path) || path, path };
+    }),
   };
 }
 
 export const settings = loadConfig();
+
+export class ProjectExistsError extends Error {
+  constructor(public readonly path: string) {
+    super(`Project at ${path} already exists`);
+    this.name = 'ProjectExistsError';
+  }
+}
+
+export async function addProject(name: string | undefined, rawPath: string): Promise<Project> {
+  const path = expandHome(rawPath);
+  if (settings.projects.some((p) => p.path === path)) {
+    throw new ProjectExistsError(path);
+  }
+  const finalName = name?.trim() || basename(path) || path;
+  const project: Project = { name: finalName, path };
+  settings.projects.push(project);
+  await persistProjects();
+  return project;
+}
+
+/** Remove a project entry from config only. Does NOT touch ~/.claude/projects sessions. */
+export async function removeProject(rawPath: string): Promise<boolean> {
+  const path = expandHome(rawPath);
+  const before = settings.projects.length;
+  settings.projects = settings.projects.filter((p) => p.path !== path);
+  if (settings.projects.length === before) return false;
+  await persistProjects();
+  return true;
+}
+
+async function persistProjects(): Promise<void> {
+  const current: Record<string, unknown> = existsSync(configPath)
+    ? (JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>)
+    : { host: settings.host, port: settings.port };
+  current['projects'] = settings.projects.map((p) => ({ name: p.name, path: p.path }));
+  await writeFile(configPath, JSON.stringify(current, null, 2));
+}
 
 /** Returns true if `target` is inside any whitelisted project root. */
 export function isPathAllowed(target: string): boolean {

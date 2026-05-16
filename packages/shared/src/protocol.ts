@@ -25,10 +25,10 @@ export const KNOWN_MODELS = [
 
 export type ChatServerMessage =
   | { type: 'session_ready'; session_key: string; cwd: string; permission_mode: PermissionMode; resumed?: string | null }
-  | { type: 'assistant'; model?: string; content: ContentBlock[] }
-  | { type: 'user'; content: ContentBlock[] }
-  | { type: 'system'; subtype?: string; data?: unknown }
-  | { type: 'result'; subtype?: string; duration_ms?: number; duration_api_ms?: number; is_error: boolean; num_turns?: number; session_id?: string; total_cost_usd?: number; usage?: unknown }
+  | { type: 'assistant'; model?: string; content: ContentBlock[]; timestamp?: number }
+  | { type: 'user'; content: ContentBlock[]; timestamp?: number }
+  | { type: 'system'; subtype?: string; data?: unknown; timestamp?: number }
+  | { type: 'result'; subtype?: string; duration_ms?: number; duration_api_ms?: number; is_error: boolean; num_turns?: number; session_id?: string; total_cost_usd?: number; usage?: unknown; timestamp?: number }
   | { type: 'stream_block_start'; index: number; kind: string }
   | { type: 'stream_delta'; index: number; kind: 'text' | 'thinking'; text: string }
   | { type: 'stream_block_stop'; index: number }

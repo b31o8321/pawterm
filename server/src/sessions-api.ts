@@ -86,12 +86,22 @@ export async function registerSessionsApi(app: FastifyInstance): Promise<void> {
       offset,
     });
     return {
-      messages: msgs.map((sm) => ({
-        uuid: (sm as { uuid?: string }).uuid ?? null,
-        parent_uuid: (sm as { parent_uuid?: string }).parent_uuid ?? null,
-        timestamp: (sm as { timestamp?: string | number }).timestamp ?? null,
-        message: messageToWire(sm) ?? sm,
-      })),
+      messages: msgs.map((sm) => {
+        const rawTs = (sm as { timestamp?: string | number }).timestamp;
+        // JSONL persists ISO strings; live SDK objects use epoch ms.
+        const ts =
+          typeof rawTs === 'string' ? Date.parse(rawTs) :
+          typeof rawTs === 'number' ? rawTs :
+          null;
+        const wire = messageToWire(sm);
+        return {
+          uuid: (sm as { uuid?: string }).uuid ?? null,
+          parent_uuid: (sm as { parent_uuid?: string }).parent_uuid ?? null,
+          timestamp: ts,
+          // Embed timestamp into the message itself so client doesn't have to thread it.
+          message: wire ? { ...wire, timestamp: ts ?? undefined } : sm,
+        };
+      }),
     };
   });
 

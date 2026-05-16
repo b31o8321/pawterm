@@ -51,12 +51,14 @@ abstract class IncomingMessage {
           content: ((json['content'] as List?) ?? [])
               .map((b) => ContentBlock.fromJson(Map<String, dynamic>.from(b)))
               .toList(),
+          timestamp: (json['timestamp'] as num?)?.toInt(),
         );
       case 'user':
         return UserMsg(
           content: ((json['content'] as List?) ?? [])
               .map((b) => ContentBlock.fromJson(Map<String, dynamic>.from(b)))
               .toList(),
+          timestamp: (json['timestamp'] as num?)?.toInt(),
         );
       case 'result':
         return ResultMsg(
@@ -65,6 +67,7 @@ abstract class IncomingMessage {
           sessionId: json['session_id'] as String?,
           numTurns: (json['num_turns'] as num?)?.toInt(),
           isError: (json['is_error'] as bool?) ?? false,
+          timestamp: (json['timestamp'] as num?)?.toInt(),
         );
       case 'system':
         return SystemMsg(
@@ -122,12 +125,14 @@ class SessionReady extends IncomingMessage {
 class AssistantMsg extends IncomingMessage {
   final List<ContentBlock> content;
   final String? model;
-  AssistantMsg({required this.content, this.model});
+  final int? timestamp; // epoch ms; null when server didn't tag it
+  AssistantMsg({required this.content, this.model, this.timestamp});
 }
 
 class UserMsg extends IncomingMessage {
   final List<ContentBlock> content;
-  UserMsg({required this.content});
+  final int? timestamp;
+  UserMsg({required this.content, this.timestamp});
 }
 
 class ResultMsg extends IncomingMessage {
@@ -136,7 +141,15 @@ class ResultMsg extends IncomingMessage {
   final String? sessionId;
   final int? numTurns;
   final bool isError;
-  ResultMsg({this.durationMs, this.totalCostUsd, this.sessionId, this.numTurns, this.isError = false});
+  final int? timestamp;
+  ResultMsg({
+    this.durationMs,
+    this.totalCostUsd,
+    this.sessionId,
+    this.numTurns,
+    this.isError = false,
+    this.timestamp,
+  });
 }
 
 class SystemMsg extends IncomingMessage {

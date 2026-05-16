@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/protocol.dart';
+import '../i18n/locale_provider.dart';
 import '../theme.dart';
+import '../utils/time_format.dart';
 import 'tool_call_card.dart';
 
 class MessageView extends StatelessWidget {
@@ -15,24 +18,38 @@ class MessageView extends StatelessWidget {
     final msg = message;
 
     if (msg is AssistantMsg) {
+      // 过滤掉不渲染的块（目前是 thinking）。如果过滤后没有任何可视块，
+      // 整条消息就不渲染——避免出现一个孤零零的 "CLAUDE" 头加空白。
+      final visible = msg.content.where((b) => b is! ThinkingBlock).toList();
+      if (visible.isEmpty) return const SizedBox.shrink();
       return Padding(
         padding: const EdgeInsets.only(bottom: 20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _Header(label: 'CLAUDE', color: t.accent),
+            _Header(label: 'CLAUDE', color: t.accent, timestamp: msg.timestamp),
             const SizedBox(height: 6),
-            ...msg.content.map((b) => _renderBlock(context, b)),
+            ...visible.map((b) => _renderBlock(context, b)),
           ],
         ),
       );
     }
 
     if (msg is UserMsg) {
-      // Server-side UserMessage carries tool_result blocks.
+      // 历史会话里，UserMsg 既可能携带用户输入的 text，也可能携带 tool_result。
+      // - text 内容若是斜杠命令（<command-name>...）或命令输出/系统提示，渲染成紧凑 chip
+      // - 普通 text 渲染成右侧绿色气泡（和 LocalUserInput 一致）
+      // - tool_result/其它块按原样渲染在主流里
       return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: msg.content.map((b) => _renderBlock(context, b)).toList(),
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: msg.content.map((b) {
+          if (b is TextBlock) {
+            final chip = _tryParseCommandChip(b.text);
+            if (chip != null) return chip;
+            return _UserBubble(text: b.text);
+          }
+          return _renderBlock(context, b);
+        }).toList(),
       );
     }
 
@@ -102,27 +119,9 @@ class MessageView extends StatelessWidget {
     }
 
     if (block is ThinkingBlock) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: t.surface,
-            borderRadius: BorderRadius.circular(4),
-            border: Border(left: BorderSide(color: t.textDim, width: 2)),
-          ),
-          child: Text(
-            block.text,
-            style: TextStyle(
-              color: t.textMuted,
-              fontStyle: FontStyle.italic,
-              fontSize: 12,
-              height: 1.5,
-            ),
-          ),
-        ),
-      );
+      // 历史会话与最终消息里完全不显示 thinking 内容。
+      // claude-code CLI 同样不渲染 thinking_delta（参见 docs/streaming-response.md）。
+      return const SizedBox.shrink();
     }
 
     if (block is ToolUseBlock) {
@@ -137,14 +136,219 @@ class MessageView extends StatelessWidget {
   }
 }
 
-class _Header extends StatelessWidget {
-  final String label;
-  final Color color;
-  const _Header({required this.label, required this.color});
+// ── command / system-reminder 标签解析 ────────────────────────
+//
+// Claude Code 协议里，用户 text 内容可能携带带标签的"结构化消息"，例如：
+//   <command-name>/model</command-name>
+//   <command-message>model</command-message>
+//   <command-args>claude-sonnet-4-6</command-args>
+//
+//   <local-command-stdout>Set model to claude-sonnet-4-6</local-command-stdout>
+//
+//   <system-reminder>...</system-reminder>
+//
+// 这些是协议级 envelope，不是用户原文输入，应该用单独的紧凑样式渲染，避免
+// 跟普通消息混淆。
+
+Widget? _tryParseCommandChip(String text) {
+  final trimmed = text.trim();
+  // 1) 斜杠命令调用
+  final cmdName = _extractTag(trimmed, 'command-name');
+  if (cmdName != null) {
+    final args = _extractTag(trimmed, 'command-args');
+    return _CommandCallChip(name: cmdName, args: args);
+  }
+  // 2) 命令输出
+  final stdout = _extractTag(trimmed, 'local-command-stdout');
+  if (stdout != null) {
+    return _CommandOutputChip(text: stdout, isError: false);
+  }
+  final stderr = _extractTag(trimmed, 'local-command-stderr');
+  if (stderr != null) {
+    return _CommandOutputChip(text: stderr, isError: true);
+  }
+  // 3) 系统提示（隐藏；这些是注入给模型的，不该出现在主流里）
+  if (trimmed.startsWith('<system-reminder>')) {
+    return const SizedBox.shrink();
+  }
+  return null;
+}
+
+String? _extractTag(String input, String tag) {
+  final re = RegExp('<$tag>([\\s\\S]*?)</$tag>');
+  final m = re.firstMatch(input);
+  return m?.group(1)?.trim();
+}
+
+class _CommandCallChip extends StatelessWidget {
+  final String name;
+  final String? args;
+  const _CommandCallChip({required this.name, this.args});
 
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Align(
+        alignment: Alignment.center,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 320),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: t.surfaceHi,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: t.border, width: 0.5),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.terminal, size: 13, color: t.textDim),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: name.startsWith('/') ? name : '/$name',
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: t.text,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (args != null && args!.isNotEmpty)
+                        TextSpan(
+                          text: '  $args',
+                          style: TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            color: t.textMuted,
+                          ),
+                        ),
+                    ],
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CommandOutputChip extends StatelessWidget {
+  final String text;
+  final bool isError;
+  const _CommandOutputChip({required this.text, required this.isError});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final color = isError ? t.error : t.textMuted;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Align(
+        alignment: Alignment.center,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 360),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: t.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isError ? t.error.withValues(alpha: 0.25) : t.border,
+              width: 0.5,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                isError ? Icons.error_outline : Icons.subdirectory_arrow_right,
+                size: 13,
+                color: color,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: color,
+                    fontFamily: 'monospace',
+                    height: 1.45,
+                  ),
+                  maxLines: 6,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 用户消息气泡（用于 UserMsg 历史 text 块）。与 chat_tab 里的 _UserMessage
+/// 同样视觉规格：右对齐、绿色气泡、最大宽度 78%。
+class _UserBubble extends StatelessWidget {
+  final String text;
+  const _UserBubble({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final maxW = MediaQuery.of(context).size.width * 0.78;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxW),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: t.accent,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(14),
+                topRight: Radius.circular(14),
+                bottomLeft: Radius.circular(14),
+                bottomRight: Radius.circular(4),
+              ),
+            ),
+            child: SelectableText(
+              text,
+              style: const TextStyle(
+                fontSize: 14,
+                color: Colors.white,
+                height: 1.45,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Header extends ConsumerWidget {
+  final String label;
+  final Color color;
+  final int? timestamp;
+  const _Header({required this.label, required this.color, this.timestamp});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
+    final ts = tsFromMillis(timestamp);
     return Row(
       children: [
         Text(
@@ -156,18 +360,15 @@ class _Header extends StatelessWidget {
             color: color,
           ),
         ),
-        const SizedBox(width: 8),
-        Text(
-          _now(),
-          style: TextStyle(fontFamily: 'monospace', fontSize: 10, color: t.textDim),
-        ),
+        if (ts != null) ...[
+          const SizedBox(width: 8),
+          Text(
+            formatMessageTime(ts, yesterdayLabel: s.timeYesterday),
+            style: TextStyle(fontFamily: 'monospace', fontSize: 10, color: t.textDim),
+          ),
+        ],
       ],
     );
-  }
-
-  String _now() {
-    final now = DateTime.now();
-    return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
   }
 }
 

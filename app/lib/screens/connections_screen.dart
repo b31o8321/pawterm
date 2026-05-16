@@ -1,31 +1,76 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../i18n/locale_provider.dart';
+import '../i18n/strings.dart';
+import '../state/prefs.dart';
+import '../state/projects_store.dart';
 import '../state/server_config.dart';
 import '../theme.dart';
 import 'add_connection_sheet.dart';
-import 'main_shell.dart';
+import 'project_picker_screen.dart';
 
-class ConnectionsScreen extends ConsumerWidget {
+class ConnectionsScreen extends ConsumerStatefulWidget {
   const ConnectionsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ConnectionsScreen> createState() => _ConnectionsScreenState();
+}
+
+class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
+  int _tab = 0;
+
+  @override
+  Widget build(BuildContext context) {
     final connections = ref.watch(connectionsProvider);
     final active = ref.watch(activeConnectionProvider);
+    final s = ref.watch(stringsProvider);
+    final t = AppTokens.of(context);
 
     return Scaffold(
       body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _Header(onAdd: () => _showAddSheet(context)),
-            Expanded(
-              child: connections.isEmpty
-                  ? _EmptyState(onAdd: () => _showAddSheet(context))
-                  : _ConnectionList(connections: connections, active: active),
+        bottom: false,
+        child: _tab == 0
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _Header(onAdd: () => _showAddSheet(context)),
+                  Expanded(
+                    child: connections.isEmpty
+                        ? _EmptyState(onAdd: () => _showAddSheet(context))
+                        : _ConnectionList(connections: connections, active: active),
+                  ),
+                ],
+              )
+            : const _SettingsPage(),
+      ),
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: t.bg,
+          border: Border(top: BorderSide(color: t.borderSubt, width: 0.5)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: SizedBox(
+            height: 58,
+            child: Row(
+              children: [
+                _NavItem(
+                  icon: Icons.monitor_outlined,
+                  label: s.settingsTabConnections,
+                  selected: _tab == 0,
+                  onTap: () => setState(() => _tab = 0),
+                ),
+                _NavItem(
+                  icon: Icons.settings_outlined,
+                  label: s.settingsTabSettings,
+                  selected: _tab == 1,
+                  onTap: () => setState(() => _tab = 1),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -37,6 +82,331 @@ class ConnectionsScreen extends ConsumerWidget {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => const AddConnectionSheet(),
+    );
+  }
+}
+
+class _NavItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _NavItem({required this.icon, required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final color = selected ? t.accent : t.textMuted;
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 22, color: color),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                color: color,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsPage extends ConsumerWidget {
+  const _SettingsPage();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
+    final themeMode = ref.watch(prefsProvider);
+    final langPref = ref.watch(langPrefProvider);
+    final model = ref.watch(currentModelProvider);
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+      children: [
+        // ── 外观 / Appearance ────────────────────
+        _SettingSection(s.settingsAppearance),
+        _SettingCard(children: [
+          _SegmentRow(
+            label: s.settingsTheme,
+            icon: Icons.brightness_6_outlined,
+            options: [s.settingsThemeSystem, s.settingsThemeLight, s.settingsThemeDark],
+            selected: switch (themeMode) {
+              ThemeMode.light => 1,
+              ThemeMode.dark => 2,
+              _ => 0,
+            },
+            onChanged: (i) => ref.read(prefsProvider.notifier).setTheme(
+                  [ThemeMode.system, ThemeMode.light, ThemeMode.dark][i],
+                ),
+          ),
+          Divider(color: t.borderSubt, height: 1, indent: 44),
+          _SegmentRow(
+            label: s.settingsLanguage,
+            icon: Icons.translate_outlined,
+            options: [s.settingsLanguageSystem, 'English', '中文'],
+            selected: switch (langPref) {
+              LangPref.en => 1,
+              LangPref.zh => 2,
+              _ => 0,
+            },
+            onChanged: (i) => ref.read(langPrefProvider.notifier).set(
+                  [LangPref.system, LangPref.en, LangPref.zh][i],
+                ),
+          ),
+        ]),
+
+        // ── Claude 模型 ───────────────────
+        _SettingSection(s.settingsClaudeModel),
+        _SettingCard(children: [
+          for (final m in knownModels) ...[
+            _RadioRow(
+              label: m.label,
+              icon: Icons.auto_awesome_outlined,
+              subtitle: m.description,
+              selected: model.id == m.id,
+              onTap: () => ref.read(currentModelProvider.notifier).state = m,
+            ),
+            if (m != knownModels.last) Divider(color: t.borderSubt, height: 1, indent: 44),
+          ],
+        ]),
+
+        // ── 关于 / About ──────────────────────────
+        _SettingSection(s.settingsAbout),
+        _SettingCard(children: [
+          _InfoRow(
+            icon: Icons.info_outline,
+            label: s.settingsVersion,
+            value: '0.1.0',
+          ),
+          Divider(color: t.borderSubt, height: 1, indent: 44),
+          _InfoRow(
+            icon: Icons.person_outline,
+            label: s.settingsAuthor,
+            value: 'airoucat',
+          ),
+          Divider(color: t.borderSubt, height: 1, indent: 44),
+          _TapRow(
+            icon: Icons.code,
+            label: 'GitHub',
+            onTap: () {},
+          ),
+        ]),
+      ],
+    );
+  }
+}
+
+// ── 复用组件 ─────────────────────────────────────────────
+
+class _SettingSection extends StatelessWidget {
+  final String label;
+  const _SettingSection(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(2, 16, 2, 8),
+      child: Text(
+        label.toUpperCase(),
+        style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: t.textDim, letterSpacing: 0.7),
+      ),
+    );
+  }
+}
+
+class _SettingCard extends StatelessWidget {
+  final List<Widget> children;
+  const _SettingCard({required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: t.surface,
+        border: Border.all(color: t.border),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      clipBehavior: Clip.hardEdge,
+      child: Column(children: children),
+    );
+  }
+}
+
+class _SegmentRow extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final List<String> options;
+  final int selected;
+  final ValueChanged<int> onChanged;
+  const _SegmentRow({
+    required this.label, required this.icon,
+    required this.options, required this.selected, required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: t.textMuted),
+          const SizedBox(width: 10),
+          Text(label, style: TextStyle(fontSize: 14, color: t.text)),
+          const Spacer(),
+          Container(
+            decoration: BoxDecoration(
+              color: t.surfaceHi,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: t.border),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(options.length, (i) {
+                final active = i == selected;
+                return GestureDetector(
+                  onTap: () => onChanged(i),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: active ? t.accent : Colors.transparent,
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: Text(
+                      options[i],
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                        color: active ? Colors.white : t.textMuted,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RadioRow extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+  const _RadioRow({
+    required this.label, required this.icon,
+    required this.subtitle, required this.selected, required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: selected ? t.accent : t.textMuted),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      color: t.text,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: t.textDim.withValues(alpha: 0.85),
+                      letterSpacing: 0.1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (selected)
+              Icon(Icons.check_rounded, size: 18, color: t.accent),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  const _InfoRow({required this.icon, required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: t.textMuted),
+          const SizedBox(width: 10),
+          Text(label, style: TextStyle(fontSize: 14, color: t.text)),
+          const Spacer(),
+          Text(value, style: TextStyle(fontSize: 13, color: t.textMuted)),
+        ],
+      ),
+    );
+  }
+}
+
+class _TapRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _TapRow({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: t.textMuted),
+            const SizedBox(width: 10),
+            Text(label, style: TextStyle(fontSize: 14, color: t.text)),
+            const Spacer(),
+            Icon(Icons.chevron_right, size: 18, color: t.textDim),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -82,13 +452,14 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _EmptyState extends StatelessWidget {
+class _EmptyState extends ConsumerWidget {
   final VoidCallback onAdd;
   const _EmptyState({required this.onAdd});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -107,12 +478,12 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 20),
             Text(
-              '还没有连接',
+              s.connectionsEmpty,
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: t.text),
             ),
             const SizedBox(height: 8),
             Text(
-              '添加一台运行了 Claude Companion Server\n的机器，就能从手机控制它。',
+              s.connectionsEmptyHintLong,
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 13, color: t.textMuted, height: 1.7),
             ),
@@ -120,7 +491,7 @@ class _EmptyState extends StatelessWidget {
             FilledButton.icon(
               onPressed: onAdd,
               icon: const Icon(Icons.add, size: 16),
-              label: const Text('添加第一台'),
+              label: Text(s.connectionsAddFirst),
             ),
           ],
         ),
@@ -136,6 +507,7 @@ class _ConnectionList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(stringsProvider);
     final recent = connections
         .where((e) => e.lastConnected != null)
         .toList()
@@ -146,12 +518,12 @@ class _ConnectionList extends ConsumerWidget {
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
       children: [
         if (recent.isNotEmpty) ...[
-          _SectionLabel('最近使用'),
+          _SectionLabel(s.connectionsSectionRecent),
           for (final e in recent)
             _ConnCard(entry: e, isActive: e.id == active?.id),
         ],
         if (others.isNotEmpty) ...[
-          _SectionLabel(recent.isEmpty ? '全部' : '其他'),
+          _SectionLabel(recent.isEmpty ? s.connectionsSectionAll : s.connectionsSectionOther),
           for (final e in others)
             _ConnCard(entry: e, isActive: e.id == active?.id),
         ],
@@ -190,6 +562,7 @@ class _ConnCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
 
     return GestureDetector(
       onTap: () => _connect(context, ref),
@@ -240,9 +613,10 @@ class _ConnCard extends ConsumerWidget {
                     Row(
                       children: [
                         if (isActive)
-                          _Tag(label: '已连接', accent: true)
+                          _Tag(label: s.connectionsTagConnected, accent: true)
                         else if (entry.lastConnected != null)
-                          _Tag(label: '上次 ${_ago(entry.lastConnected!)}'),
+                          _Tag(label: s.connectionsTagLastUsedTpl
+                              .replaceAll('{ago}', _ago(entry.lastConnected!, s))),
                       ],
                     ),
                   ],
@@ -260,13 +634,14 @@ class _ConnCard extends ConsumerWidget {
   void _connect(BuildContext context, WidgetRef ref) {
     ref.read(activeConnectionProvider.notifier).state = entry;
     ref.read(connectionsProvider.notifier).touch(entry.id);
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const MainShell()),
+    Navigator.of(context).push(
+      CupertinoPageRoute(builder: (_) => const ProjectPickerScreen()),
     );
   }
 
   void _showActions(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
+    final s = ref.read(stringsProvider);
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -285,7 +660,7 @@ class _ConnCard extends ConsumerWidget {
             const SizedBox(height: 8),
             ListTile(
               leading: Icon(Icons.edit_outlined, color: t.textMuted),
-              title: Text('编辑', style: TextStyle(color: t.text, fontSize: 15)),
+              title: Text(s.connectionsEdit, style: TextStyle(color: t.text, fontSize: 15)),
               onTap: () {
                 Navigator.pop(ctx);
                 showModalBottomSheet(
@@ -299,7 +674,7 @@ class _ConnCard extends ConsumerWidget {
             Divider(color: t.borderSubt, height: 1),
             ListTile(
               leading: Icon(Icons.delete_outline, color: t.error),
-              title: Text('删除', style: TextStyle(color: t.error, fontSize: 15)),
+              title: Text(s.connectionsRemove, style: TextStyle(color: t.error, fontSize: 15)),
               onTap: () {
                 Navigator.pop(ctx);
                 ref.read(connectionsProvider.notifier).remove(entry.id);
@@ -315,13 +690,13 @@ class _ConnCard extends ConsumerWidget {
     );
   }
 
-  String _ago(DateTime dt) {
+  String _ago(DateTime dt, Strings s) {
     final diff = DateTime.now().difference(dt);
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inHours < 1) return '${diff.inMinutes}m 前';
-    if (diff.inDays < 1) return '${diff.inHours}h 前';
-    if (diff.inDays < 7) return '${diff.inDays}天前';
-    return '${(diff.inDays / 7).floor()}周前';
+    if (diff.inMinutes < 1) return s.timeJustNow;
+    if (diff.inHours < 1) return s.timeMinutesAgoTpl.replaceAll('{n}', '${diff.inMinutes}');
+    if (diff.inDays < 1) return s.timeHoursAgoTpl.replaceAll('{n}', '${diff.inHours}');
+    if (diff.inDays < 7) return s.timeDaysAgoTpl.replaceAll('{n}', '${diff.inDays}');
+    return s.timeWeeksAgoTpl.replaceAll('{n}', '${(diff.inDays / 7).floor()}');
   }
 }
 

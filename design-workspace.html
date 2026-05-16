@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Companion — Workspace Design</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg:          #0B1210;
+    --surface:     #141B18;
+    --surface-hi:  #1A221E;
+    --border:      #2A332E;
+    --border-subt: #1E2622;
+    --text:        #E6E6E6;
+    --muted:       #9BA39E;
+    --dim:         #6B746F;
+    --accent:      #10B981;
+    --accent-subt: rgba(16,185,129,0.12);
+    --violet:      #A78BFA;
+    --blue:        #61AFEF;
+  }
+  body {
+    background: #0d1117;
+    min-height: 100vh;
+    padding: 40px 24px 80px;
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    display: flex; flex-wrap: wrap; gap: 32px; justify-content: center; align-items: flex-start;
+  }
+  .col { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+  .label {
+    color: rgba(255,255,255,0.25); font-size: 10px;
+    text-transform: uppercase; letter-spacing: 1px; text-align: center;
+  }
+  .note {
+    color: rgba(255,255,255,0.18); font-size: 10px; text-align: center;
+    max-width: 380px; line-height: 1.6; font-style: italic;
+  }
+
+  /* Phone */
+  .phone {
+    width: 390px;
+    background: var(--bg);
+    border-radius: 44px;
+    overflow: hidden;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.07);
+    position: relative;
+    display: flex; flex-direction: column;
+  }
+
+  /* Status bar */
+  .sb {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 28px 8px; flex-shrink: 0;
+  }
+  .sb-time { color: var(--text); font-size: 15px; font-weight: 600; }
+  .sb-icons { display: flex; gap: 6px; align-items: center; color: var(--text); }
+
+  /* ─── Project Picker ─────────────────── */
+  .pp-header {
+    padding: 6px 20px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .server-chip {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 20px; padding: 5px 10px 5px 8px;
+  }
+  .server-dot { width: 7px; height: 7px; border-radius: 50%; background: #22C55E; flex-shrink: 0; }
+  .server-name { color: var(--text); font-size: 12px; font-weight: 600; }
+  .server-chevron { color: var(--dim); }
+
+  .pp-title-row { padding: 0 20px 16px; }
+  .pp-title { color: var(--text); font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  .pp-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+  .scroll { flex: 1; overflow-y: auto; padding: 0 16px 32px; scrollbar-width: none; }
+  .scroll::-webkit-scrollbar { display: none; }
+
+  .sec { color: var(--dim); font-size: 10px; font-weight: 600; letter-spacing: 0.8px;
+    text-transform: uppercase; padding: 4px 2px 10px; }
+
+  .proj-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer;
+  }
+  .proj-card.active { border-color: rgba(16,185,129,0.3); background: linear-gradient(135deg, #131a17, #0f1612); }
+  .proj-top { display: flex; align-items: center; gap: 10px; }
+  .proj-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0;
+  }
+  .pi-green { background: rgba(16,185,129,0.12); }
+  .pi-blue  { background: rgba(97,175,239,0.12); }
+  .pi-violet{ background: rgba(167,139,250,0.12); }
+  .proj-name { color: var(--text); font-size: 14px; font-weight: 600; flex: 1; }
+  .proj-path {
+    color: var(--dim); font-size: 10px; font-family: monospace;
+    margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .proj-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+  .proj-session-preview {
+    color: var(--muted); font-size: 11px; flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .proj-session-preview span { color: var(--text); font-weight: 500; }
+  .proj-actions { display: flex; gap: 6px; }
+  .proj-btn {
+    background: var(--surface-hi); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px;
+    color: var(--muted); font-size: 11px; font-weight: 500;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .proj-btn.primary { background: var(--accent-subt); border-color: rgba(16,185,129,0.25); color: var(--accent); }
+
+  .add-proj-row {
+    border: 1.5px dashed var(--border); border-radius: 14px;
+    padding: 13px 16px; display: flex; align-items: center; gap: 10px;
+    color: var(--muted); font-size: 13px; font-weight: 500; cursor: pointer; margin-bottom: 10px;
+  }
+  .add-proj-row svg { color: var(--dim); }
+
+  /* ─── MainShell top bar redesign ──────── */
+  .topbar {
+    padding: 8px 12px 8px 8px;
+    display: flex; align-items: center; gap: 6px;
+    border-bottom: 1px solid var(--border-subt);
+    flex-shrink: 0;
+  }
+  .back-btn {
+    display: flex; align-items: center; gap: 4px;
+    padding: 6px 8px 6px 6px;
+    border-radius: 8px;
+    color: var(--muted); font-size: 11px;
+    background: transparent; flex-shrink: 0;
+  }
+  .back-btn:hover { background: var(--surface); }
+
+  .ctx-pill {
+    flex: 1; display: flex; align-items: center; gap: 0;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 5px 10px; cursor: pointer; min-width: 0;
+    overflow: hidden;
+  }
+  .ctx-project { color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .ctx-sep { color: var(--dim); margin: 0 4px; font-size: 11px; }
+  .ctx-session {
+    color: var(--muted); font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  }
+  .ctx-chevron { color: var(--dim); margin-left: 4px; flex-shrink: 0; }
+
+  .model-chip {
+    display: flex; align-items: center; gap: 4px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 8px;
+    color: var(--muted); font-size: 11px; flex-shrink: 0;
+  }
+  .model-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  /* chat body placeholder */
+  .chat-body { flex: 1; display: flex; flex-direction: column; padding: 12px 16px; gap: 12px; }
+  .msg-row { display: flex; gap: 10px; }
+  .msg-row.user { flex-direction: row-reverse; }
+  .bubble {
+    max-width: 72%; border-radius: 16px; padding: 10px 13px; font-size: 12px; line-height: 1.6;
+  }
+  .bubble.ai { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 16px 16px 16px 4px; }
+  .bubble.user { background: var(--accent); color: #fff; border-radius: 16px 16px 4px 16px; }
+
+  /* bottom nav */
+  .bnav {
+    background: var(--bg); border-top: 1px solid var(--border-subt);
+    display: flex; padding: 10px 0 28px; flex-shrink: 0;
+  }
+  .bnav-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .bnav-icon { color: var(--dim); }
+  .bnav-icon.on { color: var(--accent); }
+  .bnav-lbl { font-size: 10px; font-weight: 500; color: var(--dim); }
+  .bnav-lbl.on { color: var(--accent); font-weight: 600; }
+
+  /* ─── Session picker sheet ────────────── */
+  .overlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(3px);
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  .sheet {
+    background: var(--surface); border-radius: 24px 24px 0 0;
+    border: 1px solid var(--border); border-bottom: none;
+    padding: 16px 0 40px; max-height: 72%;
+    display: flex; flex-direction: column;
+  }
+  .sheet-handle { width: 36px; height: 4px; background: var(--border); border-radius: 2px; margin: 0 auto 16px; }
+  .sheet-title { color: var(--text); font-size: 15px; font-weight: 700; padding: 0 20px 12px; }
+  .sheet-scroll { overflow-y: auto; padding: 0 16px; flex: 1; }
+
+  .sess-card {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 8px; cursor: pointer;
+    display: flex; align-items: flex-start; gap: 10px;
+  }
+  .sess-card.active { border-color: rgba(16,185,129,0.3); background: var(--accent-subt); }
+  .sess-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-top: 5px; flex-shrink: 0; }
+  .sess-dot.on { background: var(--accent); }
+  .sess-title { color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.4; }
+  .sess-meta { color: var(--dim); font-size: 10.5px; margin-top: 3px; font-family: monospace; }
+
+  .new-sess-btn {
+    background: var(--accent); border: none; border-radius: 10px;
+    padding: 12px; color: #fff; font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 12px 16px 0;
+  }
+
+  /* ─── Add project sheet ───────────────── */
+  .add-sheet {
+    background: var(--surface); border-radius: 24px 24px 0 0;
+    border: 1px solid var(--border); border-bottom: none;
+    padding: 18px 20px 40px;
+  }
+  .f-label { color: var(--muted); font-size: 12px; font-weight: 500; margin-bottom: 6px; }
+  .f-input {
+    width: 100%; background: var(--surface-hi); border: 1px solid var(--border);
+    border-radius: 8px; padding: 11px 14px; color: var(--text);
+    font-size: 13px; font-family: monospace; margin-bottom: 12px; outline: none;
+  }
+  .f-input.focused { border-color: var(--accent); }
+  .path-suggestion {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin-bottom: 14px;
+  }
+  .path-row {
+    padding: 10px 14px; display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--border-subt); cursor: pointer;
+  }
+  .path-row:last-child { border-bottom: none; }
+  .path-row:hover { background: var(--surface); }
+  .path-icon { font-size: 14px; }
+  .path-name { color: var(--text); font-size: 13px; font-weight: 500; }
+  .path-full { color: var(--dim); font-size: 10px; font-family: monospace; }
+  .sheet-actions { display: flex; gap: 10px; margin-top: 4px; }
+  .btn-cancel {
+    flex: 1; background: var(--surface-hi); border: 1px solid var(--border);
+    border-radius: 10px; padding: 13px; color: var(--muted); font-size: 14px; font-weight: 600;
+  }
+  .btn-save {
+    flex: 2; background: var(--accent); border: none;
+    border-radius: 10px; padding: 13px; color: #fff; font-size: 14px; font-weight: 600;
+  }
+
+  /* transition viz */
+  .transition-demo {
+    width: 390px; background: #111;
+    border-radius: 20px; padding: 24px;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .t-step {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .t-step:last-child { border-bottom: none; }
+  .t-num {
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent-subt); border: 1px solid rgba(16,185,129,0.3);
+    color: var(--accent); font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .t-desc { color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .t-desc strong { color: var(--text); }
+  .t-code {
+    display: inline-block; background: rgba(255,255,255,0.05);
+    border-radius: 4px; padding: 1px 6px; font-family: monospace;
+    font-size: 11px; color: var(--accent);
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════
+     A · Project Picker (replaces blank entry)
+══════════════════════════════════════ -->
+<div class="col">
+  <div class="label">A · 进入后先选项目（替换空白页）</div>
+  <div class="phone" style="min-height:820px;">
+    <div class="sb">
+      <span class="sb-time">9:41</span>
+      <div class="sb-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="16" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+
+    <!-- header: server chip + action -->
+    <div class="pp-header">
+      <div class="server-chip">
+        <span class="server-dot"></span>
+        <span class="server-name">airoucat-MacBook-Pro</span>
+        <svg class="server-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <div style="width:32px;height:32px;border-radius:8px;background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="pp-title-row">
+      <div class="pp-title">选择项目</div>
+      <div class="pp-sub">选择工作目录，开始或继续对话</div>
+    </div>
+
+    <div class="scroll">
+      <!-- resume last session card -->
+      <div class="sec">上次</div>
+      <div class="proj-card active" style="margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+          <div style="width:6px;height:6px;border-radius:50%;background:var(--accent);"></div>
+          <span style="color:var(--accent);font-size:10px;font-weight:600;letter-spacing:0.3px;">继续上次</span>
+        </div>
+        <div class="proj-top">
+          <div class="proj-icon pi-green">🚀</div>
+          <div style="flex:1;min-width:0;">
+            <div class="proj-name">claude-companion</div>
+            <div class="proj-path">~/workspace/shulex/claude-companion</div>
+          </div>
+        </div>
+        <div style="margin-top:10px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);border-radius:8px;padding:8px 10px;">
+          <div style="color:var(--text);font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">实现连接管理页面和多服务器支持</div>
+          <div style="color:var(--dim);font-size:10.5px;font-family:monospace;margin-top:2px;">今天 21:47 · 32 条消息</div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;">
+          <button class="proj-btn primary" style="flex:2;justify-content:center;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            继续这个对话
+          </button>
+          <button class="proj-btn" style="flex:1;justify-content:center;">其他会话</button>
+        </div>
+      </div>
+
+      <!-- all projects -->
+      <div class="sec" style="margin-top:4px;">所有项目</div>
+
+      <div class="proj-card">
+        <div class="proj-top">
+          <div class="proj-icon pi-blue">💼</div>
+          <div style="flex:1;min-width:0;">
+            <div class="proj-name">shulex-gpt</div>
+            <div class="proj-path">~/workspace/shulex/shulex-gpt</div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--dim)"><path d="m9 18 6-6-6-6"/></svg>
+        </div>
+        <div class="proj-footer">
+          <div class="proj-session-preview"><span>优化 prompt 缓存策略</span> · 昨天</div>
+        </div>
+      </div>
+
+      <div class="proj-card">
+        <div class="proj-top">
+          <div class="proj-icon pi-violet">⚡</div>
+          <div style="flex:1;min-width:0;">
+            <div class="proj-name">chatflow</div>
+            <div class="proj-path">~/workspace/shulex/chatflow</div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--dim)"><path d="m9 18 6-6-6-6"/></svg>
+        </div>
+        <div class="proj-footer">
+          <div class="proj-session-preview" style="color:var(--dim);">暂无会话</div>
+        </div>
+      </div>
+
+      <!-- add project -->
+      <div class="add-proj-row" style="margin-top:4px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+        添加项目目录
+      </div>
+    </div>
+  </div>
+  <div class="note">连接后先落到这页，不再有空白状态。<br>「上次」卡片一键续接，降低摩擦。</div>
+</div>
+
+
+<!-- ══════════════════════════════════════
+     B · Redesigned top bar
+══════════════════════════════════════ -->
+<div class="col">
+  <div class="label">B · 新顶栏（去掉返回箭头+三道杠）</div>
+  <div class="phone" style="min-height:640px;">
+    <div class="sb">
+      <span class="sb-time">9:41</span>
+      <div class="sb-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="16" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+
+    <!-- NEW top bar -->
+    <div class="topbar">
+      <!-- left: back to project picker -->
+      <button class="back-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m15 18-6-6 6-6"/></svg>
+        <span style="font-size:11px;font-weight:600;">🖥️</span>
+      </button>
+
+      <!-- center: project + session pill (tappable) -->
+      <div class="ctx-pill">
+        <span class="ctx-project">claude-companion</span>
+        <span class="ctx-sep">/</span>
+        <span class="ctx-session">实现连接管理页面和多服务器…</span>
+        <svg class="ctx-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+
+      <!-- right: model -->
+      <div class="model-chip">
+        <span class="model-dot"></span>
+        <span>Sonnet</span>
+      </div>
+    </div>
+
+    <!-- chat -->
+    <div class="chat-body">
+      <div class="msg-row">
+        <div class="bubble ai">好的，我来帮你实现连接管理页面。首先需要重构 <code style="background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;font-size:11px;">server_config.dart</code>…</div>
+      </div>
+      <div class="msg-row user">
+        <div class="bubble user">连接上了，进入操作页的过渡动画好丑</div>
+      </div>
+      <div class="msg-row">
+        <div class="bubble ai">明白，我来改成 <strong>fade + scale</strong> 过渡，更自然。</div>
+      </div>
+    </div>
+
+    <!-- bottom nav -->
+    <div class="bnav">
+      <div class="bnav-item">
+        <svg class="bnav-icon on" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span class="bnav-lbl on">Chat</span>
+      </div>
+      <div class="bnav-item">
+        <svg class="bnav-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        <span class="bnav-lbl">Shell</span>
+      </div>
+      <div class="bnav-item">
+        <svg class="bnav-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/></svg>
+        <span class="bnav-lbl">Files</span>
+      </div>
+    </div>
+  </div>
+  <div class="note">左边小箭头+服务器emoji = 返回项目选择。<br>中间 pill 点击弹出会话切换。右边模型。<br>去掉了三道杠和多余的返回箭头。</div>
+</div>
+
+
+<!-- ══════════════════════════════════════
+     C · Session switcher sheet
+══════════════════════════════════════ -->
+<div class="col">
+  <div class="label">C · 点中间 pill → 会话切换弹层</div>
+  <div class="phone" style="min-height:640px;">
+    <div class="sb"><span class="sb-time">9:41</span></div>
+    <div class="topbar">
+      <button class="back-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m15 18-6-6 6-6"/></svg>
+        <span style="font-size:11px;font-weight:600;">🖥️</span>
+      </button>
+      <div class="ctx-pill" style="border-color:rgba(16,185,129,0.4);">
+        <span class="ctx-project">claude-companion</span>
+        <span class="ctx-sep">/</span>
+        <span class="ctx-session">实现连接管理页面…</span>
+        <svg class="ctx-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--accent)"><path d="m18 15-6-6-6 6"/></svg>
+      </div>
+      <div class="model-chip"><span class="model-dot"></span><span>Sonnet</span></div>
+    </div>
+    <div class="chat-body" style="opacity:0.2;pointer-events:none;">
+      <div class="msg-row"><div class="bubble ai">好的，我来帮你实现…</div></div>
+    </div>
+
+    <!-- sheet -->
+    <div class="overlay">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">claude-companion</div>
+        <div class="sheet-scroll">
+          <div class="sess-card active">
+            <div class="sess-dot on"></div>
+            <div>
+              <div class="sess-title">实现连接管理页面和多服务器支持</div>
+              <div class="sess-meta">今天 21:47 · 32 条消息</div>
+            </div>
+          </div>
+          <div class="sess-card">
+            <div class="sess-dot"></div>
+            <div>
+              <div class="sess-title">修复 shell xterm 字体图标显示问题</div>
+              <div class="sess-meta">今天 14:22 · 18 条消息</div>
+            </div>
+          </div>
+          <div class="sess-card">
+            <div class="sess-dot"></div>
+            <div>
+              <div class="sess-title">重构项目目录结构和 Flutter 构建配置</div>
+              <div class="sess-meta">昨天 19:05 · 45 条消息</div>
+            </div>
+          </div>
+          <div class="sess-card">
+            <div class="sess-dot"></div>
+            <div>
+              <div class="sess-title">添加 Nerd Font 图标字体支持</div>
+              <div class="sess-meta">5月15日 · 12 条消息</div>
+            </div>
+          </div>
+        </div>
+        <button class="new-sess-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+          新对话
+        </button>
+      </div>
+    </div>
+  </div>
+  <div class="note">点中间 pill 弹出，列出当前项目所有会话。<br>底部固定「新对话」按钮在拇指区。</div>
+</div>
+
+
+<!-- ══════════════════════════════════════
+     D · Add project sheet
+══════════════════════════════════════ -->
+<div class="col">
+  <div class="label">D · 添加项目（服务端目录补全）</div>
+  <div class="phone" style="min-height:600px;">
+    <div class="sb"><span class="sb-time">9:41</span></div>
+    <div style="padding:8px 20px 14px;display:flex;align-items:center;justify-content:space-between;">
+      <div style="color:var(--text);font-size:18px;font-weight:700;">选择项目</div>
+    </div>
+    <div class="scroll" style="opacity:0.2;pointer-events:none;padding-bottom:0;">
+      <div class="proj-card" style="margin-bottom:8px;"><div class="proj-top"><div class="proj-icon pi-green">🚀</div><div><div class="proj-name">claude-companion</div></div></div></div>
+    </div>
+
+    <!-- add sheet overlay -->
+    <div class="overlay">
+      <div class="add-sheet">
+        <div style="width:36px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 18px;"></div>
+        <div style="color:var(--text);font-size:17px;font-weight:700;margin-bottom:18px;">添加项目</div>
+
+        <div class="f-label">昵称</div>
+        <input class="f-input" type="text" placeholder="项目名称" value="agent-builder">
+
+        <div class="f-label">目录路径</div>
+        <input class="f-input focused" type="text" placeholder="~/workspace/..." value="~/workspace/shulex/">
+
+        <!-- path suggestions from server -->
+        <div class="path-suggestion">
+          <div class="path-row">
+            <span class="path-icon">📁</span>
+            <div>
+              <div class="path-name">agent-builder</div>
+              <div class="path-full">~/workspace/shulex/agent-builder</div>
+            </div>
+          </div>
+          <div class="path-row">
+            <span class="path-icon">📁</span>
+            <div>
+              <div class="path-name">shulex-gpt</div>
+              <div class="path-full">~/workspace/shulex/shulex-gpt</div>
+            </div>
+          </div>
+          <div class="path-row">
+            <span class="path-icon">📁</span>
+            <div>
+              <div class="path-name">chatflow</div>
+              <div class="path-full">~/workspace/shulex/chatflow</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sheet-actions">
+          <button class="btn-cancel">取消</button>
+          <button class="btn-save">添加</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="note">输入路径时服务端实时返回目录列表（需加 /browse API）。<br>点击补全，不用手打完整路径。</div>
+</div>
+
+
+<!-- ══════════════════════════════════════
+     E · Transition design spec
+══════════════════════════════════════ -->
+<div class="col">
+  <div class="label">E · 过渡动画方案</div>
+  <div class="transition-demo">
+    <div style="color:rgba(255,255,255,0.5);font-size:11px;margin-bottom:16px;letter-spacing:0.5px;">TRANSITION SPEC</div>
+
+    <div class="t-step">
+      <div class="t-num">1</div>
+      <div class="t-desc">
+        <strong>连接列表 → 项目选择</strong><br>
+        <span class="t-code">FadeTransition</span> + 轻微 <span class="t-code">ScaleTransition(0.96→1.0)</span><br>
+        duration 220ms · curve <span class="t-code">easeOut</span><br>
+        感觉：「进入一个空间」，不是「推开一扇门」
+      </div>
+    </div>
+
+    <div class="t-step">
+      <div class="t-num">2</div>
+      <div class="t-desc">
+        <strong>项目选择 → Chat</strong><br>
+        <span class="t-code">SlideTransition</span> 从右进入（标准 iOS push）<br>
+        duration 300ms · curve <span class="t-code">easeInOut</span><br>
+        感觉：「进入子层级」，有空间感
+      </div>
+    </div>
+
+    <div class="t-step">
+      <div class="t-num">3</div>
+      <div class="t-desc">
+        <strong>Chat → 返回项目选择</strong><br>
+        <span class="t-code">SlideTransition</span> 向右退出<br>
+        + 轻微 <span class="t-code">FadeTransition(1.0→0.0)</span><br>
+        感觉：「回到上一层」，方向清晰
+      </div>
+    </div>
+
+    <div class="t-step">
+      <div class="t-num">4</div>
+      <div class="t-desc">
+        <strong>弹层（会话切换 / 添加项目）</strong><br>
+        <span class="t-code">BottomSheet</span> 带 spring 弹性<br>
+        <span class="t-code">barrierColor</span> 渐变遮罩 + 背景 blur<br>
+        感觉：「浮出」，轻盈不打断
+      </div>
+    </div>
+
+    <div style="margin-top:16px;padding:12px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.15);border-radius:8px;">
+      <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:6px;">Flutter 实现方式</div>
+      <div style="color:var(--muted);font-size:11px;line-height:1.8;">
+        用 <span class="t-code">PageRouteBuilder</span> 自定义 1 和 2 的路由。<br>
+        连接→项目 用 <span class="t-code">FadeTransition</span>，<br>
+        项目→Chat 用 <span class="t-code">CupertinoPageRoute</span>（自带 iOS 滑动返回手势）。
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

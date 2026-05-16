@@ -61,13 +61,14 @@ class ModelOption {
   final String id;
   final String label;
   final String tier;
-  const ModelOption(this.id, this.label, this.tier);
+  final String description;
+  const ModelOption(this.id, this.label, this.tier, this.description);
 }
 
 const knownModels = <ModelOption>[
-  ModelOption('claude-sonnet-4-6', 'Sonnet 4.6', 'fast'),
-  ModelOption('claude-opus-4-7', 'Opus 4.7', 'powerful'),
-  ModelOption('claude-haiku-4-5', 'Haiku 4.5', 'cheap'),
+  ModelOption('claude-sonnet-4-6', 'Sonnet 4.6', 'fast', '日常推荐'),
+  ModelOption('claude-opus-4-7', 'Opus 4.7', 'powerful', '深度推理'),
+  ModelOption('claude-haiku-4-5', 'Haiku 4.5', 'cheap', '轻量快速'),
 ];
 
 final currentModelProvider = StateProvider<ModelOption>((ref) => knownModels.first);

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../i18n/locale_provider.dart';
 import '../../state/projects_store.dart';
 import '../../theme.dart';
 
@@ -10,6 +11,7 @@ class FilesTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
     final session = ref.watch(currentSessionProvider);
     return Center(
       child: Padding(
@@ -20,8 +22,9 @@ class FilesTab extends ConsumerWidget {
             Icon(Icons.folder_open, size: 40, color: t.textDim),
             const SizedBox(height: 12),
             Text(
-              session == null ? '从左侧选择项目' : 'Files（即将上线）',
+              session == null ? s.chatEmptyPickProject : s.filesComingSoon,
               style: TextStyle(fontSize: 14, color: t.textMuted, fontWeight: FontWeight.w500),
+              textAlign: TextAlign.center,
             ),
             if (session != null) ...[
               const SizedBox(height: 4),

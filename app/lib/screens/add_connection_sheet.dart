@@ -1,9 +1,12 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import '../i18n/locale_provider.dart';
 import '../state/server_config.dart';
 import '../theme.dart';
 
@@ -50,11 +53,20 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
   String get _normalizedUrl {
     var v = _urlCtrl.text.trim();
     if (v.isEmpty) return '';
+    // Android emulator: localhost → 10.0.2.2
+    if (!kIsWeb && Platform.isAndroid) {
+      v = v.replaceFirst(RegExp(r'^(https?://)?localhost'), 'http://10.0.2.2');
+    }
     if (!v.startsWith('http')) v = 'http://$v';
-    // default port
     final uri = Uri.tryParse(v);
-    if (uri != null && uri.port == 0) {
-      v = '${uri.scheme}://${uri.host}:8765${uri.path}';
+    if (uri == null) return v;
+    // Add default port 8765 only when the user didn't specify one explicitly.
+    // In Dart, Uri.port returns the scheme default (80/443) when absent —
+    // so we check the raw string instead of uri.port.
+    final hostPart = v.replaceFirst(RegExp(r'^https?://'), '').split('/').first;
+    final hasExplicitPort = hostPart.contains(':');
+    if (!hasExplicitPort) {
+      v = '${uri.scheme}://${uri.host}:8765${uri.path.isEmpty ? '' : uri.path}';
     }
     return v.endsWith('/') ? v.substring(0, v.length - 1) : v;
   }
@@ -83,14 +95,16 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
           _phase = _SheetState.detected;
         });
       } else {
+        final s = ref.read(stringsProvider);
         setState(() {
-          _errorMsg = '服务端返回 ${res.statusCode}';
+          _errorMsg = s.addConnectionServerReturnedTpl.replaceAll('{code}', '${res.statusCode}');
           _phase = _SheetState.error;
         });
       }
     } catch (e) {
+      final s = ref.read(stringsProvider);
       setState(() {
-        _errorMsg = '无法连接，请检查地址和端口';
+        _errorMsg = s.addConnectionUnreachable;
         _phase = _SheetState.error;
       });
     }
@@ -117,6 +131,7 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
@@ -138,13 +153,13 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
             ),
             const SizedBox(height: 20),
             Text(
-              widget.editing != null ? '编辑连接' : '添加连接',
+              widget.editing != null ? s.addConnectionEditTitle : s.addConnectionTitle,
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: t.text),
             ),
             const SizedBox(height: 20),
 
             // URL field
-            _Label('服务端地址'),
+            _Label(s.addConnectionUrl),
             TextField(
               controller: _urlCtrl,
               enabled: _phase == _SheetState.input ||
@@ -153,17 +168,20 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
               keyboardType: TextInputType.url,
               style: TextStyle(fontFamily: 'monospace', fontSize: 13, color: t.text),
               decoration: InputDecoration(
-                hintText: '192.168.1.x 或 域名',
+                hintText: s.addConnectionUrlHintLan,
                 suffixText: ':8765',
                 suffixStyle: TextStyle(color: t.textDim, fontFamily: 'monospace', fontSize: 12),
               ),
+              onChanged: (_) {
+                if (_phase == _SheetState.error) setState(() => _phase = _SheetState.input);
+              },
               onSubmitted: (_) {
                 if (_phase == _SheetState.input || _phase == _SheetState.error) _detect();
               },
             ),
             const SizedBox(height: 6),
             Text(
-              '端口默认 8765，可写 IP:端口 指定其他端口',
+              s.addConnectionPortNote,
               style: TextStyle(fontSize: 11, color: t.textDim),
             ),
             const SizedBox(height: 16),
@@ -176,7 +194,7 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
                   child: CircularProgressIndicator(strokeWidth: 2, color: t.accent),
                 ),
                 const SizedBox(width: 10),
-                Text('正在连接并识别服务端…',
+                Text(s.addConnectionDetecting,
                     style: TextStyle(fontSize: 13, color: t.textMuted)),
               ]),
               const SizedBox(height: 20),
@@ -213,22 +231,23 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
                   Icon(Icons.check_circle_outline, size: 14, color: t.accent),
                   const SizedBox(width: 8),
                   Text(
-                    '已识别${_detectedVersion != null ? '，v$_detectedVersion' : ''}',
+                    s.addConnectionDetectedTpl.replaceAll('{ver}',
+                        _detectedVersion != null ? ' · v$_detectedVersion' : ''),
                     style: TextStyle(fontSize: 12, color: t.accent),
                   ),
                 ]),
               ),
               const SizedBox(height: 16),
 
-              _Label('名称'),
+              _Label(s.addConnectionName),
               TextField(
                 controller: _nameCtrl,
                 style: TextStyle(fontSize: 14, color: t.text),
-                decoration: const InputDecoration(hintText: '可修改昵称'),
+                decoration: InputDecoration(hintText: s.addConnectionNameNicknameHint),
               ),
               const SizedBox(height: 16),
 
-              _Label('图标'),
+              _Label(s.addConnectionEmoji),
               _EmojiPicker(
                 selected: _emoji,
                 onSelect: (e) => setState(() => _emoji = e),
@@ -247,7 +266,8 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
                     foregroundColor: t.textMuted,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
-                  child: const Text('取消', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  child: Text(s.addConnectionCancel,
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                 ),
               ),
               const SizedBox(width: 10),
@@ -256,15 +276,20 @@ class _AddConnectionSheetState extends ConsumerState<AddConnectionSheet> {
                 child: FilledButton(
                   onPressed: _phase == _SheetState.detecting
                       ? null
-                      : _phase == _SheetState.detected
-                          ? _save
-                          : _detect,
+                      : () {
+                          FocusScope.of(context).unfocus();
+                          if (_phase == _SheetState.detected) {
+                            _save();
+                          } else {
+                            _detect();
+                          }
+                        },
                   style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 13),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                   child: Text(
-                    _phase == _SheetState.detected ? '保存' : '连接',
+                    _phase == _SheetState.detected ? s.addConnectionSave : s.addConnectionConnectBtn,
                     style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                   ),
                 ),

@@ -6,9 +6,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../i18n/locale_provider.dart';
 import '../../state/projects_store.dart';
 import '../../state/server_config.dart';
 import '../../theme.dart';
+import 'shell_search_bar.dart';
 
 class ShellTab extends ConsumerStatefulWidget {
   const ShellTab({super.key});
@@ -24,6 +26,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
   bool _ctrlSticky = false;
   bool _altSticky = false;
   bool _connected = false;
+  bool _searching = false;
   String? _error;
   String? _connectedCwd;
 
@@ -146,6 +149,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final s = ref.watch(stringsProvider);
     final session = ref.watch(currentSessionProvider);
 
     if (session == null) {
@@ -158,12 +162,12 @@ class _ShellTabState extends ConsumerState<ShellTab> {
               Icon(Icons.terminal, size: 40, color: t.textDim),
               const SizedBox(height: 12),
               Text(
-                '没有进行中的对话',
+                s.shellEmptyTitle,
                 style: TextStyle(fontSize: 14, color: t.textMuted, fontWeight: FontWeight.w500),
               ),
               const SizedBox(height: 4),
               Text(
-                '从左上角菜单选择项目',
+                s.shellEmptyPickProject,
                 style: TextStyle(fontSize: 12, color: t.textDim),
               ),
             ],
@@ -197,10 +201,16 @@ class _ShellTabState extends ConsumerState<ShellTab> {
                 Expanded(child: Text(_error!, style: TextStyle(color: t.error, fontSize: 12))),
                 TextButton(
                   onPressed: _restart,
-                  child: Text('重连', style: TextStyle(color: t.accent, fontSize: 12)),
+                  child: Text(s.shellReconnect, style: TextStyle(color: t.accent, fontSize: 12)),
                 ),
               ],
             ),
+          ),
+        if (_searching)
+          ShellSearchBar(
+            terminal: _terminal!,
+            controller: _controller,
+            onClose: () => setState(() => _searching = false),
           ),
         Expanded(
           child: ColoredBox(
@@ -246,6 +256,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
         SafeArea(top: false, child: _VirtualKeyBar(
           ctrl: _ctrlSticky,
           alt: _altSticky,
+          searching: _searching,
           onCtrl: () => setState(() => _ctrlSticky = !_ctrlSticky),
           onAlt: () => setState(() => _altSticky = !_altSticky),
           onEsc: () => _sendSpecial('\x1b'),
@@ -257,6 +268,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
           onRight: () => _sendSpecial('\x1b[C'),
           onPaste: _paste,
           onInterrupt: _interrupt,
+          onToggleSearch: () => setState(() => _searching = !_searching),
         )),
       ],
     );
@@ -266,6 +278,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
 class _VirtualKeyBar extends StatelessWidget {
   final bool ctrl;
   final bool alt;
+  final bool searching;
   final VoidCallback onCtrl;
   final VoidCallback onAlt;
   final VoidCallback onEsc;
@@ -277,10 +290,12 @@ class _VirtualKeyBar extends StatelessWidget {
   final VoidCallback onRight;
   final VoidCallback onPaste;
   final VoidCallback onInterrupt;
+  final VoidCallback onToggleSearch;
 
   const _VirtualKeyBar({
     required this.ctrl,
     required this.alt,
+    required this.searching,
     required this.onCtrl,
     required this.onAlt,
     required this.onEsc,
@@ -292,6 +307,7 @@ class _VirtualKeyBar extends StatelessWidget {
     required this.onRight,
     required this.onPaste,
     required this.onInterrupt,
+    required this.onToggleSearch,
   });
 
   Widget _key(BuildContext context, String label, VoidCallback onTap, {bool active = false}) {
@@ -348,6 +364,7 @@ class _VirtualKeyBar extends StatelessWidget {
             const SizedBox(width: 8),
             _key(context, '^C', onInterrupt),
             _key(context, '📋', onPaste),
+            _key(context, '🔍', onToggleSearch, active: searching),
           ],
         ),
       ),
