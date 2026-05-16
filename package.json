@@ -1,0 +1,19 @@
+{
+  "name": "claude-companion",
+  "private": true,
+  "description": "Mobile + Web control surface for local Claude Code",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter=@cc/server --filter=@cc/web run dev",
+    "dev:server": "pnpm --filter @cc/server run dev",
+    "dev:web": "pnpm --filter @cc/web run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.31.0"
+}

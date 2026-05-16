@@ -1,0 +1,151 @@
+import type { ContentBlock } from '@cc/shared';
+
+/**
+ * Convert raw SDK messages (from @anthropic-ai/claude-agent-sdk) to wire dicts.
+ *
+ * The SDK emits objects whose `type` field already matches our protocol;
+ * here we just normalize block shapes and prune internal fields.
+ */
+
+export function messageToWire(msg: any): any | null {
+  if (!msg || typeof msg !== 'object') return null;
+
+  const type = msg.type;
+
+  switch (type) {
+    case 'system':
+      return {
+        type: 'system',
+        subtype: msg.subtype ?? null,
+        data: safe(msg.data),
+      };
+
+    case 'assistant':
+      return {
+        type: 'assistant',
+        model: msg.message?.model ?? msg.model,
+        content: extractContent(msg.message?.content ?? msg.content),
+      };
+
+    case 'user':
+      return {
+        type: 'user',
+        content: extractContent(msg.message?.content ?? msg.content ?? []),
+      };
+
+    case 'result':
+      return {
+        type: 'result',
+        subtype: msg.subtype,
+        duration_ms: msg.duration_ms,
+        duration_api_ms: msg.duration_api_ms,
+        is_error: !!msg.is_error,
+        num_turns: msg.num_turns,
+        session_id: msg.session_id,
+        total_cost_usd: msg.total_cost_usd,
+        usage: safe(msg.usage),
+      };
+
+    case 'stream_event': {
+      // Partial assistant stream: forward only useful text deltas to keep client cheap.
+      const ev = msg.event;
+      if (!ev) return null;
+      // Anthropic stream event types: message_start | content_block_start | content_block_delta | content_block_stop | message_delta | message_stop
+      if (ev.type === 'content_block_delta') {
+        const delta = ev.delta;
+        if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+          return {
+            type: 'stream_delta',
+            index: ev.index,
+            kind: 'text',
+            text: delta.text,
+          };
+        }
+        if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+          return {
+            type: 'stream_delta',
+            index: ev.index,
+            kind: 'thinking',
+            text: delta.thinking,
+          };
+        }
+      }
+      if (ev.type === 'content_block_start') {
+        return {
+          type: 'stream_block_start',
+          index: ev.index,
+          kind: ev.content_block?.type ?? 'unknown',
+        };
+      }
+      if (ev.type === 'content_block_stop') {
+        return { type: 'stream_block_stop', index: ev.index };
+      }
+      return null;
+    }
+
+    default:
+      return null;
+  }
+}
+
+function extractContent(content: unknown): ContentBlock[] {
+  if (!content) return [];
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  if (!Array.isArray(content)) return [];
+
+  return content
+    .map((b: any): ContentBlock | null => {
+      if (!b || typeof b !== 'object') return null;
+      switch (b.type) {
+        case 'text':
+          return { type: 'text', text: String(b.text ?? '') };
+        case 'thinking':
+          return { type: 'thinking', text: String(b.thinking ?? b.text ?? '') };
+        case 'tool_use':
+          return {
+            type: 'tool_use',
+            id: String(b.id ?? ''),
+            name: String(b.name ?? ''),
+            input: typeof b.input === 'object' && b.input !== null ? b.input : {},
+          };
+        case 'tool_result':
+          return {
+            type: 'tool_result',
+            tool_use_id: String(b.tool_use_id ?? ''),
+            content: normalizeToolResultContent(b.content),
+            is_error: !!b.is_error,
+          };
+        default:
+          return null;
+      }
+    })
+    .filter((b): b is ContentBlock => b !== null);
+}
+
+function normalizeToolResultContent(content: unknown): any {
+  if (content == null) return null;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((item: any) => {
+      if (item && typeof item === 'object' && 'text' in item) {
+        return { type: 'text', text: String(item.text) };
+      }
+      return { type: 'text', text: String(item) };
+    });
+  }
+  return String(content);
+}
+
+function safe(v: unknown): unknown {
+  if (v === null || v === undefined) return v;
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return v;
+  if (Array.isArray(v)) return v.map(safe);
+  if (typeof v === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[k] = safe(val);
+    }
+    return out;
+  }
+  return String(v);
+}

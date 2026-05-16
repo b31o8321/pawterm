@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Companion — Connections</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg:          #0B1210;
+    --surface:     #141B18;
+    --surface-hi:  #1A221E;
+    --border:      #2A332E;
+    --border-subt: #1E2622;
+    --text:        #E6E6E6;
+    --muted:       #9BA39E;
+    --dim:         #6B746F;
+    --accent:      #10B981;
+    --accent-subt: rgba(16,185,129,0.12);
+    --error:       #EF4444;
+    --warning:     #EAB308;
+  }
+  body {
+    background: #111827;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 48px 24px;
+    font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+  .col { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+  .screen-title {
+    color: rgba(255,255,255,0.28);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+
+  /* ── Phone shell ── */
+  .phone {
+    width: 390px;
+    background: var(--bg);
+    border-radius: 44px;
+    overflow: hidden;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.07);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Status bar ── */
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 28px 8px;
+    flex-shrink: 0;
+  }
+  .status-time { color: var(--text); font-size: 15px; font-weight: 600; }
+  .status-icons { display: flex; gap: 6px; align-items: center; color: var(--text); }
+
+  /* ── App header ── */
+  .app-header {
+    padding: 6px 20px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .app-title { color: var(--text); font-size: 22px; font-weight: 700; letter-spacing: -0.4px; }
+  .icon-btn {
+    width: 36px; height: 36px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .icon-btn.accent { color: var(--accent); border-color: rgba(16,185,129,0.3); background: var(--accent-subt); }
+
+  /* ── Scroll body ── */
+  .scroll-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 16px 110px;
+    scrollbar-width: none;
+  }
+  .scroll-body::-webkit-scrollbar { display: none; }
+
+  /* ── Section label ── */
+  .sec-label {
+    color: var(--dim);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+    padding: 4px 2px 10px;
+  }
+
+  /* ── Connection card ── */
+  .conn-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 14px 14px 14px 14px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+    overflow: hidden;
+  }
+  .conn-card.active {
+    border-color: rgba(16,185,129,0.30);
+    background: linear-gradient(140deg, #131a17, #0f1612);
+  }
+  .conn-card.active::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(140deg, rgba(16,185,129,0.06), transparent 55%);
+    pointer-events: none;
+  }
+
+  .avatar {
+    width: 44px; height: 44px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .av-green  { background: rgba(16,185,129,0.12); }
+  .av-blue   { background: rgba(59,130,246,0.12); }
+  .av-violet { background: rgba(167,139,250,0.12); }
+  .av-orange { background: rgba(251,146,60,0.12); }
+
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    position: absolute; bottom: -1px; right: -1px;
+    border: 2px solid var(--surface);
+  }
+  .dot-on  { background: #22C55E; }
+  .dot-off { background: var(--dim); }
+  .dot-warn { background: var(--warning); }
+  .conn-card.active .dot { border-color: #131a17; }
+
+  .conn-info { flex: 1; min-width: 0; }
+  .conn-name {
+    color: var(--text); font-size: 14px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .conn-host {
+    color: var(--muted); font-size: 11.5px;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+  .conn-foot {
+    display: flex; align-items: center; gap: 6px; margin-top: 5px;
+  }
+  .tag {
+    border-radius: 4px; padding: 1px 6px;
+    font-size: 10px; font-weight: 600;
+    background: var(--surface-hi); border: 1px solid var(--border); color: var(--dim);
+  }
+  .tag.on {
+    background: rgba(16,185,129,0.10); border-color: rgba(16,185,129,0.22); color: var(--accent);
+  }
+  .conn-ago { color: var(--dim); font-size: 10.5px; }
+  .chevron { color: var(--dim); flex-shrink: 0; }
+
+  /* ── Bottom nav ── */
+  .bottom-nav {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: var(--bg);
+    border-top: 1px solid var(--border-subt);
+    display: flex;
+    padding: 10px 0 30px;
+  }
+  .nav-item {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; gap: 4px;
+  }
+  .nav-icon { color: var(--dim); }
+  .nav-icon.on { color: var(--accent); }
+  .nav-lbl { font-size: 10px; font-weight: 500; color: var(--dim); }
+  .nav-lbl.on { color: var(--accent); font-weight: 600; }
+
+  /* ── Empty state ── */
+  .empty {
+    flex: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 60px 32px;
+    text-align: center; gap: 14px;
+  }
+  .empty-icon {
+    width: 80px; height: 80px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 24px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px; margin-bottom: 6px;
+  }
+  .empty-h { color: var(--text); font-size: 17px; font-weight: 600; }
+  .empty-p { color: var(--muted); font-size: 13px; line-height: 1.7; max-width: 250px; }
+  .btn-primary {
+    margin-top: 6px;
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 10px; padding: 13px 28px;
+    font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  /* ── Bottom sheet ── */
+  .overlay {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(3px);
+    display: flex; flex-direction: column; justify-content: flex-end;
+  }
+  .sheet {
+    background: var(--surface);
+    border-radius: 24px 24px 0 0;
+    border: 1px solid var(--border); border-bottom: none;
+    padding: 18px 20px 40px;
+  }
+  .sheet-handle {
+    width: 36px; height: 4px; background: var(--border);
+    border-radius: 2px; margin: 0 auto 20px;
+  }
+  .sheet-title { color: var(--text); font-size: 17px; font-weight: 700; margin-bottom: 20px; }
+
+  .f-label { color: var(--muted); font-size: 12px; font-weight: 500; margin-bottom: 6px; }
+  .f-input {
+    width: 100%;
+    background: var(--surface-hi); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; color: var(--text); font-size: 14px; font-family: inherit;
+    margin-bottom: 16px; outline: none;
+  }
+  .f-input.mono { font-family: 'SF Mono', 'Menlo', monospace; font-size: 13px; }
+  .f-input.focused { border-color: var(--accent); }
+  .f-hint { color: var(--dim); font-size: 11px; margin-top: -12px; margin-bottom: 16px; }
+
+  /* detected name row */
+  .detected-row {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(16,185,129,0.07);
+    border: 1px solid rgba(16,185,129,0.2);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 16px;
+  }
+  .detected-icon { font-size: 20px; }
+  .detected-info { flex: 1; }
+  .detected-name { color: var(--text); font-size: 13px; font-weight: 600; }
+  .detected-sub { color: var(--accent); font-size: 11px; margin-top: 1px; }
+  .detected-edit { color: var(--muted); }
+
+  .sheet-actions { display: flex; gap: 10px; margin-top: 4px; }
+  .btn-cancel {
+    flex: 1; background: var(--surface-hi); border: 1px solid var(--border);
+    border-radius: 10px; padding: 13px; color: var(--muted);
+    font-size: 14px; font-weight: 600;
+  }
+  .btn-save {
+    flex: 2; background: var(--accent); border: none;
+    border-radius: 10px; padding: 13px; color: #fff;
+    font-size: 14px; font-weight: 600;
+  }
+  .btn-save.dim { background: var(--surface-hi); color: var(--dim); border: 1px solid var(--border); }
+
+  /* loading spinner */
+  .spinner {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid rgba(16,185,129,0.2); border-top-color: var(--accent);
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* state label below sheets */
+  .state-note {
+    color: rgba(255,255,255,0.22); font-size: 11px; text-align: center;
+    padding: 6px 0 2px; letter-spacing: 0.3px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════
+     Screen A — Connection list
+══════════════════════════════════ -->
+<div class="col">
+  <div class="screen-title">A · 连接列表</div>
+  <div class="phone" style="min-height: 780px;">
+    <div class="status-bar">
+      <span class="status-time">9:41</span>
+      <div class="status-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/><rect x="13.5" y="0" width="2.5" height="12" rx="1" opacity="0.3"/></svg>
+        <svg width="16" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="16" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+
+    <div class="app-header">
+      <div class="app-title">Connections</div>
+      <div class="icon-btn accent">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+      </div>
+    </div>
+
+    <div class="scroll-body">
+      <div class="sec-label">最近使用</div>
+
+      <!-- active card -->
+      <div class="conn-card active">
+        <div class="avatar av-green">🖥️<span class="dot dot-on"></span></div>
+        <div class="conn-info">
+          <div class="conn-name">airoucat-MacBook-Pro</div>
+          <div class="conn-host">192.168.1.5:8765</div>
+          <div class="conn-foot">
+            <span class="tag on">已连接</span>
+            <span class="conn-ago">刚刚</span>
+          </div>
+        </div>
+        <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+      </div>
+
+      <!-- card 2 -->
+      <div class="conn-card">
+        <div class="avatar av-blue">💻<span class="dot dot-off"></span></div>
+        <div class="conn-info">
+          <div class="conn-name">Work-iMac-Office</div>
+          <div class="conn-host">10.0.0.12:8765</div>
+          <div class="conn-foot">
+            <span class="tag">上次 2h 前</span>
+          </div>
+        </div>
+        <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+      </div>
+
+      <div class="sec-label" style="margin-top:8px;">其他</div>
+
+      <!-- card 3 -->
+      <div class="conn-card">
+        <div class="avatar av-violet">🌐<span class="dot dot-warn"></span></div>
+        <div class="conn-info">
+          <div class="conn-name">aliyun-vps</div>
+          <div class="conn-host">47.123.xx.xx:8765</div>
+          <div class="conn-foot">
+            <span class="tag">上次 昨天</span>
+          </div>
+        </div>
+        <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+      </div>
+    </div>
+
+    <div class="bottom-nav">
+      <div class="nav-item">
+        <svg class="nav-icon on" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        <span class="nav-lbl on">连接</span>
+      </div>
+      <div class="nav-item">
+        <svg class="nav-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span class="nav-lbl">设置</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════
+     Screen B — Empty state
+══════════════════════════════════ -->
+<div class="col">
+  <div class="screen-title">B · 空状态</div>
+  <div class="phone" style="min-height: 600px;">
+    <div class="status-bar">
+      <span class="status-time">9:41</span>
+      <div class="status-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="10" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+    <div class="app-header">
+      <div class="app-title">Connections</div>
+      <div class="icon-btn accent">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+      </div>
+    </div>
+    <div class="empty">
+      <div class="empty-icon">🖥️</div>
+      <div class="empty-h">还没有连接</div>
+      <div class="empty-p">添加一台运行了 Claude Companion Server 的机器，就能从手机控制它。</div>
+      <button class="btn-primary">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        添加第一台
+      </button>
+    </div>
+    <div class="bottom-nav">
+      <div class="nav-item">
+        <svg class="nav-icon on" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        <span class="nav-lbl on">连接</span>
+      </div>
+      <div class="nav-item">
+        <svg class="nav-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/></svg>
+        <span class="nav-lbl">设置</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════
+     Screen C1 — Sheet: 输入 IP 阶段
+══════════════════════════════════ -->
+<div class="col">
+  <div class="screen-title">C1 · 添加 — 填 IP</div>
+  <div class="phone" style="min-height: 680px;">
+    <div class="status-bar">
+      <span class="status-time">9:41</span>
+      <div class="status-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="15" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+    <div class="app-header"><div class="app-title">Connections</div></div>
+    <!-- dimmed bg -->
+    <div style="padding: 4px 16px; opacity: 0.2; pointer-events:none;">
+      <div class="conn-card active">
+        <div class="avatar av-green">🖥️<span class="dot dot-on"></span></div>
+        <div class="conn-info">
+          <div class="conn-name">airoucat-MacBook-Pro</div>
+          <div class="conn-host">192.168.1.5:8765</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="overlay">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">添加连接</div>
+
+        <div class="f-label">服务端地址</div>
+        <input class="f-input mono focused" type="text" placeholder="192.168.1.x 或 域名" value="192.168.1.">
+        <div class="f-hint">端口默认 8765，可写 IP:端口 指定其他端口</div>
+
+        <div class="sheet-actions">
+          <button class="btn-cancel">取消</button>
+          <button class="btn-save">连接</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="state-note">用户只需填 IP，一步完成</div>
+</div>
+
+
+<!-- ══════════════════════════════════
+     Screen C2 — Sheet: 检测中
+══════════════════════════════════ -->
+<div class="col">
+  <div class="screen-title">C2 · 添加 — 检测中</div>
+  <div class="phone" style="min-height: 680px;">
+    <div class="status-bar">
+      <span class="status-time">9:41</span>
+      <div class="status-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="15" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+    <div class="app-header"><div class="app-title">Connections</div></div>
+    <div style="padding: 4px 16px; opacity: 0.2; pointer-events:none;">
+      <div class="conn-card active">
+        <div class="avatar av-green">🖥️</div>
+        <div class="conn-info"><div class="conn-name">airoucat-MacBook-Pro</div></div>
+      </div>
+    </div>
+
+    <div class="overlay">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">添加连接</div>
+
+        <div class="f-label">服务端地址</div>
+        <input class="f-input mono" type="text" value="192.168.1.8" style="opacity:0.5; pointer-events:none;">
+
+        <!-- detecting state -->
+        <div style="display:flex; align-items:center; gap:10px; padding: 4px 0 20px; color: var(--muted); font-size:13px;">
+          <span class="spinner"></span>
+          正在连接并识别服务端…
+        </div>
+
+        <div class="sheet-actions">
+          <button class="btn-cancel">取消</button>
+          <button class="btn-save dim" style="pointer-events:none;">连接</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="state-note">POST /health → 拿 hostname</div>
+</div>
+
+
+<!-- ══════════════════════════════════
+     Screen C3 — Sheet: 识别成功确认
+══════════════════════════════════ -->
+<div class="col">
+  <div class="screen-title">C3 · 添加 — 识别成功</div>
+  <div class="phone" style="min-height: 680px;">
+    <div class="status-bar">
+      <span class="status-time">9:41</span>
+      <div class="status-icons">
+        <svg width="17" height="12" viewBox="0 0 16 12" fill="currentColor"><rect x="0" y="4" width="3" height="8" rx="1"/><rect x="4.5" y="2.5" width="3" height="9.5" rx="1"/><rect x="9" y="0.5" width="3" height="11.5" rx="1"/></svg>
+        <svg width="26" height="12" viewBox="0 0 25 12" fill="currentColor"><rect x="0" y="1" width="21" height="10" rx="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="1.5" y="2.5" width="15" height="7" rx="1.5"/><path d="M22.5 4.5v3a1.5 1.5 0 0 0 0-3z"/></svg>
+      </div>
+    </div>
+    <div class="app-header"><div class="app-title">Connections</div></div>
+    <div style="padding: 4px 16px; opacity: 0.2; pointer-events:none;">
+      <div class="conn-card active">
+        <div class="avatar av-green">🖥️</div>
+        <div class="conn-info"><div class="conn-name">airoucat-MacBook-Pro</div></div>
+      </div>
+    </div>
+
+    <div class="overlay">
+      <div class="sheet">
+        <div class="sheet-handle"></div>
+        <div class="sheet-title">添加连接</div>
+
+        <div class="f-label">服务端地址</div>
+        <input class="f-input mono" type="text" value="192.168.1.8" style="opacity:0.5; pointer-events:none;">
+
+        <!-- detected name -->
+        <div class="detected-row">
+          <div class="detected-info">
+            <div class="detected-name">airoucat-MacBook-Pro</div>
+            <div class="detected-sub">✓ 已识别，v0.1.0</div>
+          </div>
+          <svg class="detected-edit" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </div>
+        <div class="f-hint" style="margin-top:-10px; margin-bottom:18px;">名称已自动填入，点击铅笔图标可修改</div>
+
+        <!-- icon picker -->
+        <div class="f-label">图标</div>
+        <div style="display:flex; gap:8px; margin-bottom:20px;">
+          <div style="width:44px;height:44px;border-radius:10px;border:1.5px solid rgba(16,185,129,0.5);background:rgba(16,185,129,0.10);display:flex;align-items:center;justify-content:center;font-size:20px;">🖥️</div>
+          <div style="width:44px;height:44px;border-radius:10px;border:1px solid var(--border);background:var(--surface-hi);display:flex;align-items:center;justify-content:center;font-size:20px;">💻</div>
+          <div style="width:44px;height:44px;border-radius:10px;border:1px solid var(--border);background:var(--surface-hi);display:flex;align-items:center;justify-content:center;font-size:20px;">☁️</div>
+          <div style="width:44px;height:44px;border-radius:10px;border:1px solid var(--border);background:var(--surface-hi);display:flex;align-items:center;justify-content:center;font-size:20px;">🌐</div>
+          <div style="width:44px;height:44px;border-radius:10px;border:1px solid var(--border);background:var(--surface-hi);display:flex;align-items:center;justify-content:center;font-size:20px;">🏢</div>
+          <div style="width:44px;height:44px;border-radius:10px;border:1px solid var(--border);background:var(--surface-hi);display:flex;align-items:center;justify-content:center;font-size:16px;color:var(--dim);">•••</div>
+        </div>
+
+        <div class="sheet-actions">
+          <button class="btn-cancel">取消</button>
+          <button class="btn-save">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="state-note">hostname 自动填名，可点编辑</div>
+</div>
+
+</body>
+</html>

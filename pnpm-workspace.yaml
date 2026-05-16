@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+  - server
+  - web
+onlyBuiltDependencies:
+  - esbuild
+  - node-pty

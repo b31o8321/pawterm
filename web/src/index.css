@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Nerd Font icon glyphs — loaded only when a PUA codepoint is encountered.
+   Covers: Powerline, Devicons, Codicons, Font Awesome, Octicons, Material Design (subset).
+   ASCII/Latin text always falls through to the user's own monospace font first. */
+@font-face {
+  font-family: 'Symbols Nerd Font Mono';
+  src: url('/fonts/nerd-symbols.woff2') format('woff2');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+  unicode-range:
+    U+E000-E00A,
+    U+E0A0-E0D4,
+    U+E200-E2A9,
+    U+E5FA-E6B7,
+    U+E700-E7C5,
+    U+EA60-EBEB,
+    U+ED00-EF36,
+    U+F000-F2FF,
+    U+F300-F381,
+    U+F400-F533,
+    U+F8FF,
+    U+F0001-U+F0500;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+}

@@ -1,0 +1,56 @@
+# ───── Node / pnpm ─────
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+*.log
+
+# ───── 环境配置 / 私密 ─────
+.env
+.env.local
+.env.*.local
+server/config.json
+*.pem
+*.key
+
+# ───── 系统 / IDE ─────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ───── 项目本地工具 ─────
+# Claude Code 的项目级工作区/记忆，本地隐私
+.claude/
+
+# ───── Flutter ─────
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.metadata
+app/build/
+app/android/build/
+app/android/.kotlin/
+app/android/app/build/
+app/ios/Pods/
+app/ios/.symlinks/
+app/ios/Flutter/Flutter.framework/
+app/ios/Flutter/Flutter.podspec
+app/ios/Flutter/Generated.xcconfig
+app/ios/Flutter/flutter_export_environment.sh
+app/ios/Runner/GeneratedPluginRegistrant.*
+app/android/.gradle/
+app/android/.idea/
+app/android/local.properties
+app/android/captures/
+app/android/app/release/
+app/macos/Flutter/ephemeral/
+app/linux/flutter/ephemeral/
+app/windows/flutter/ephemeral/
+
+# Generated Dart files
+app/**/*.g.dart
+app/**/*.freezed.dart
+
+# 历史构建产物（用 GitHub Release 发版即可）
+app/build/app/outputs/flutter-apk/releases/

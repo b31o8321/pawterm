@@ -1,0 +1,61 @@
+/**
+ * Wire protocol between server and clients (Flutter app, Web admin).
+ * Stable contract — any change needs migration in both client codebases.
+ */
+
+// ============== Common ==============
+
+export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+
+// ============== Chat WebSocket: /ws/session ==============
+
+export type ChatClientMessage =
+  | { type: 'init'; cwd: string; permission_mode?: PermissionMode; resume?: string; model?: string }
+  | { type: 'user_message'; text: string }
+  | { type: 'set_model'; model: string }
+  | { type: 'interrupt' }
+  | { type: 'ping' };
+
+/** Available Claude models the client can pick. Keep in sync with App + Web. */
+export const KNOWN_MODELS = [
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', tier: 'fast' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7', tier: 'powerful' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', tier: 'cheap' },
+] as const;
+
+export type ChatServerMessage =
+  | { type: 'session_ready'; session_key: string; cwd: string; permission_mode: PermissionMode; resumed?: string | null }
+  | { type: 'assistant'; model?: string; content: ContentBlock[] }
+  | { type: 'user'; content: ContentBlock[] }
+  | { type: 'system'; subtype?: string; data?: unknown }
+  | { type: 'result'; subtype?: string; duration_ms?: number; duration_api_ms?: number; is_error: boolean; num_turns?: number; session_id?: string; total_cost_usd?: number; usage?: unknown }
+  | { type: 'stream_block_start'; index: number; kind: string }
+  | { type: 'stream_delta'; index: number; kind: 'text' | 'thinking'; text: string }
+  | { type: 'stream_block_stop'; index: number }
+  | { type: 'error'; message: string }
+  | { type: 'pong' };
+
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: ToolResultContent; is_error: boolean };
+
+export type ToolResultContent =
+  | string
+  | Array<{ type: 'text'; text: string } | { type: string; [k: string]: unknown }>
+  | null;
+
+// ============== Shell WebSocket: /ws/shell ==============
+
+export type ShellClientMessage =
+  | { type: 'init'; cwd: string; shell?: string; cols: number; rows: number }
+  | { type: 'input'; data: string }
+  | { type: 'resize'; cols: number; rows: number }
+  | { type: 'signal'; signal: 'SIGINT' | 'SIGTERM' | 'SIGKILL' };
+
+export type ShellServerMessage =
+  | { type: 'ready' }
+  | { type: 'output'; data: string }
+  | { type: 'exit'; code: number }
+  | { type: 'error'; message: string };

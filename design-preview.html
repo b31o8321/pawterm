@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Companion — Design Preview</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+    * { font-family: 'Inter', -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* === DARK TOKENS === */
+    .theme-dark {
+      --bg: #0B1210;            /* very subtle green tint in dark bg */
+      --surface: #141B18;
+      --surface-hi: #1A221E;
+      --border: #2A332E;
+      --border-subt: #1E2622;
+      --text: #E6E6E6;
+      --text-muted: #9BA39E;
+      --text-dim: #6B746F;
+      --accent: #10B981;        /* emerald — clean fresh green */
+      --accent-subt: rgba(16,185,129,.14);
+      --success: #22C55E;
+    }
+    /* === LIGHT TOKENS === */
+    .theme-light {
+      --bg: #F8FAF9;            /* warm white with tiny green undertone */
+      --surface: #FFFFFF;
+      --surface-hi: #F2F6F4;
+      --border: #DDE5E1;
+      --border-subt: #EAF0EC;
+      --text: #1A1F1C;
+      --text-muted: #565F5A;
+      --text-dim: #8E948F;
+      --accent: #059669;        /* deeper emerald for contrast on light */
+      --accent-subt: rgba(5,150,105,.10);
+      --success: #16A34A;
+    }
+
+    .phone {
+      width: 375px;
+      height: 760px;
+      border-radius: 38px;
+      padding: 8px;
+      background: linear-gradient(160deg, #2a2a2a, #1a1a1a);
+      box-shadow: 0 30px 80px -20px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.04);
+    }
+    .screen {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border-radius: 30px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      font-size: 14px;
+    }
+
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 30px; padding: 0 12px; border-radius: 999px;
+      font-size: 13px; font-weight: 500;
+      border: 0.5px solid var(--border);
+      background: var(--surface);
+      color: var(--text-muted);
+      cursor: pointer; transition: all .15s ease;
+    }
+    .pill.active {
+      background: var(--accent-subt);
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-radius: 8px;
+    }
+    .tool-card {
+      background: var(--surface);
+      border: 0.5px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .input {
+      background: var(--surface-hi);
+      border: 0.5px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      width: 100%;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 1px 2px rgba(0,0,0,.1);
+    }
+    .dot {
+      width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+    }
+    .session-bar { width: 3px; min-height: 32px; border-radius: 1.5px; }
+
+    /* Subtle separator line */
+    .hr { border-top: 0.5px solid var(--border-subt); }
+
+    /* Diff colors */
+    .diff-add { background: rgba(34,197,94,.08); color: #6ee787; }
+    .diff-del { background: rgba(239,68,68,.08); color: #ff8585; }
+    .theme-light .diff-add { color: #14773a; background: rgba(34,197,94,.10); }
+    .theme-light .diff-del { color: #b32a2a; background: rgba(239,68,68,.08); }
+
+    .toggle-btn {
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.1);
+      color: #e6e6e6;
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .toggle-btn.active { background: #10B981; border-color: #10B981; color: white; }
+  </style>
+</head>
+<body class="bg-[#0d0d0d] min-h-screen p-8 flex flex-col items-center">
+
+  <header class="mb-8 text-center text-white">
+    <div class="text-2xl font-semibold mb-1">Claude Companion · Design Preview</div>
+    <div class="text-sm opacity-60">Refined Developer · Medium Density · Fresh Emerald</div>
+    <div class="mt-4 flex gap-2 justify-center">
+      <button id="btnDark" class="toggle-btn active" onclick="setMode('dark')">Dark</button>
+      <button id="btnLight" class="toggle-btn" onclick="setMode('light')">Light</button>
+    </div>
+  </header>
+
+  <main class="flex flex-wrap gap-10 justify-center items-start">
+
+    <!-- ============== SCREEN 1: SERVER SETUP ============== -->
+    <div class="flex flex-col items-center gap-3">
+      <div class="text-white/60 text-xs uppercase tracking-wider">Onboarding</div>
+      <div class="phone">
+        <div class="screen theme-dark themed">
+          <div class="flex-1 px-7 pt-16 flex flex-col">
+            <!-- Hero -->
+            <div class="flex items-center gap-3 mb-12">
+              <div class="w-11 h-11 rounded-xl flex items-center justify-center border" style="background: var(--accent-subt); border-color: var(--accent);">
+                <i data-lucide="bot" style="color: var(--accent); width: 22px; height: 22px;"></i>
+              </div>
+              <div>
+                <div class="text-[18px] font-semibold leading-tight">Claude Companion</div>
+                <div class="text-[12px]" style="color: var(--text-muted)">Mobile control for Claude Code</div>
+              </div>
+            </div>
+
+            <div class="hr mb-8"></div>
+
+            <!-- Form -->
+            <label class="text-[13px] font-medium mb-2 block">服务端地址</label>
+            <input type="text" class="input mono w-full mb-2" value="http://10.0.2.2:8765" />
+            <div class="text-[11px] leading-relaxed mb-8" style="color: var(--text-muted)">
+              · Android 模拟器访问宿主 Mac 用 <span class="mono">10.0.2.2</span><br/>
+              · 真机走同 WiFi 用电脑局域网 IP <span class="mono">ipconfig getifaddr en0</span>
+            </div>
+
+            <button class="btn-primary mb-3">
+              <span style="font-weight: 600;">连接</span>
+            </button>
+            <div class="text-[11px] text-center" style="color: var(--text-dim)">
+              首次使用？先在 Mac 上跑 <span class="mono">python -m claude_companion</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============== SCREEN 2: CHAT TAB ============== -->
+    <div class="flex flex-col items-center gap-3">
+      <div class="text-white/60 text-xs uppercase tracking-wider">Chat Tab</div>
+      <div class="phone">
+        <div class="screen theme-dark themed">
+
+          <!-- Top Bar -->
+          <div class="flex items-center px-2 pt-3 pb-2">
+            <button class="p-2 rounded-md" style="color: var(--text)"><i data-lucide="menu" class="w-5 h-5"></i></button>
+            <div class="flex-1 ml-1">
+              <div class="text-[15px] font-semibold leading-tight">claude-companion</div>
+              <div class="text-[10px] mono" style="color: var(--text-dim)">/Users/.../claude-companion</div>
+            </div>
+            <button class="p-2 rounded-md" style="color: var(--text)"><i data-lucide="more-vertical" class="w-5 h-5"></i></button>
+          </div>
+
+          <!-- Pills -->
+          <div class="px-3 pb-2 flex gap-2 overflow-x-auto">
+            <div class="pill active"><i data-lucide="message-circle" class="w-4 h-4"></i> Chat</div>
+            <div class="pill"><i data-lucide="terminal" class="w-4 h-4"></i> Shell</div>
+            <div class="pill"><i data-lucide="folder" class="w-4 h-4"></i> Files</div>
+            <div class="pill"><i data-lucide="git-branch" class="w-4 h-4"></i> Git</div>
+            <div class="pill"><i data-lucide="check-square" class="w-4 h-4"></i> Tasks</div>
+          </div>
+
+          <div class="hr"></div>
+
+          <!-- Status Row -->
+          <div class="flex items-center gap-2 px-4 py-1.5 text-[11px]" style="background: var(--surface); color: var(--text-muted)">
+            <span class="dot" style="background: var(--success)"></span>
+            <span>ready</span>
+            <span style="color: var(--text-dim)">·</span>
+            <span class="mono">sonnet-4.6</span>
+            <span style="color: var(--text-dim)">·</span>
+            <span>ctx 43%</span>
+            <span class="ml-auto mono" style="color: var(--text-dim)">$0.087</span>
+          </div>
+
+          <div class="hr"></div>
+
+          <!-- Messages -->
+          <div class="flex-1 overflow-y-auto px-4 py-3 space-y-4 text-[13px]">
+
+            <!-- User message -->
+            <div>
+              <div class="flex items-center gap-2 mb-1.5">
+                <span class="text-[10px] font-semibold tracking-wider" style="color: var(--text-muted)">YOU</span>
+                <span class="text-[10px] mono" style="color: var(--text-dim)">14:32</span>
+              </div>
+              <div class="text-[14px] leading-relaxed">帮我加 session 列表</div>
+            </div>
+
+            <!-- Assistant message -->
+            <div>
+              <div class="flex items-center gap-2 mb-1.5">
+                <span class="text-[10px] font-semibold tracking-wider" style="color: var(--accent)">CLAUDE</span>
+                <span class="text-[10px] mono" style="color: var(--text-dim)">14:32</span>
+              </div>
+              <div class="leading-relaxed mb-3">
+                我会按以下步骤改：
+                <div class="mt-2 space-y-1 pl-1">
+                  <div>1. 加 <span class="mono text-[12px]" style="color:var(--accent)">SessionRegistry</span></div>
+                  <div>2. 新建 REST 端点 <span class="mono text-[12px]" style="color:var(--accent)">/sessions</span></div>
+                  <div>3. App 端 Drawer 渲染</div>
+                </div>
+              </div>
+
+              <!-- Tool card: Edit -->
+              <div class="tool-card mb-2">
+                <div class="flex items-center gap-2 mb-2">
+                  <i data-lucide="file-edit" class="w-3.5 h-3.5" style="color:var(--accent)"></i>
+                  <span class="text-[12px] font-semibold">Edit</span>
+                  <span class="mono text-[11px]" style="color:var(--text-muted)">lib/main.dart</span>
+                  <span class="ml-auto text-[10px] mono" style="color:var(--text-dim)">+1 −1</span>
+                </div>
+                <div class="mono text-[11px] space-y-0.5 pl-1">
+                  <div class="diff-del px-2 py-0.5 rounded">− const text = 'Phase 1';</div>
+                  <div class="diff-add px-2 py-0.5 rounded">+ const text = 'Phase 2';</div>
+                </div>
+              </div>
+
+              <!-- Tool card: Bash (violet to differentiate from accent green) -->
+              <div class="tool-card mb-2" style="border-left-color:#A78BFA">
+                <div class="flex items-center gap-2 mb-1.5">
+                  <i data-lucide="terminal" class="w-3.5 h-3.5" style="color:#A78BFA"></i>
+                  <span class="text-[12px] font-semibold">Bash</span>
+                  <span class="ml-auto text-[10px] mono" style="color:var(--text-dim)">0.4s · done</span>
+                </div>
+                <div class="mono text-[11px]" style="color:var(--text-muted)">
+                  $ flutter analyze lib
+                </div>
+              </div>
+
+              <!-- Metadata footer -->
+              <div class="flex items-center gap-2 mt-2 text-[10px] mono" style="color: var(--text-dim)">
+                <span>$0.04</span>
+                <span>·</span>
+                <span>12s</span>
+                <span>·</span>
+                <span>turn 1</span>
+                <span>·</span>
+                <span>49 tk</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Composer -->
+          <div class="hr"></div>
+          <div class="px-3 py-3 flex gap-2 items-end" style="background: var(--bg)">
+            <button class="p-2 rounded-md" style="color: var(--text-muted)"><i data-lucide="paperclip" class="w-4 h-4"></i></button>
+            <button class="p-2 rounded-md mono text-[12px]" style="color: var(--text-muted)">@</button>
+            <div class="flex-1 input flex items-center" style="padding-top:8px;padding-bottom:8px">
+              <span style="color: var(--text-dim); font-size: 14px">Ask Claude…</span>
+            </div>
+            <button class="p-2.5 rounded-md" style="background: var(--accent); color: white"><i data-lucide="arrow-up" class="w-4 h-4"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============== SCREEN 3: DRAWER ============== -->
+    <div class="flex flex-col items-center gap-3">
+      <div class="text-white/60 text-xs uppercase tracking-wider">Drawer / Sessions</div>
+      <div class="phone">
+        <div class="screen theme-dark themed">
+          <div class="px-4 pt-4 pb-2">
+            <div class="text-[15px] font-semibold mb-3">Projects</div>
+            <div class="hr"></div>
+          </div>
+
+          <div class="flex-1 overflow-y-auto px-2">
+
+            <!-- Project 1: expanded, with sessions -->
+            <div class="px-2 py-2.5">
+              <div class="flex items-center gap-2.5">
+                <i data-lucide="folder-open" class="w-4 h-4" style="color: var(--accent)"></i>
+                <div class="flex-1">
+                  <div class="text-[13px] font-semibold" style="color: var(--text)">claude-companion</div>
+                  <div class="text-[10px] mono" style="color: var(--text-dim)">~/workspace/.../claude-companion</div>
+                </div>
+                <i data-lucide="chevron-down" class="w-4 h-4" style="color: var(--text-muted)"></i>
+              </div>
+            </div>
+
+            <!-- New chat button -->
+            <div class="ml-6 mr-2 mb-2 px-3 py-2 rounded-md flex items-center gap-2 cursor-pointer" style="background: var(--accent-subt); color: var(--accent); font-size: 13px">
+              <i data-lucide="plus" class="w-4 h-4"></i>
+              <span>新对话</span>
+            </div>
+
+            <!-- Sessions list -->
+            <div class="ml-6 space-y-1 mb-3">
+              <!-- Current session -->
+              <div class="flex items-stretch px-3 py-2 rounded-md cursor-pointer" style="background: var(--accent-subt)">
+                <div class="session-bar mr-2.5" style="background: var(--accent)"></div>
+                <div class="flex-1">
+                  <div class="text-[13px] font-semibold flex items-center gap-1.5">
+                    <span class="dot" style="background: var(--accent)"></span>
+                    <span>修 session bug</span>
+                  </div>
+                  <div class="text-[10px] mono mt-0.5" style="color: var(--text-dim)">14:32 · 3 turns</div>
+                </div>
+              </div>
+
+              <!-- Past sessions -->
+              <div class="flex items-stretch px-3 py-2 rounded-md cursor-pointer hover:bg-white/5">
+                <div class="session-bar mr-2.5" style="background: var(--border)"></div>
+                <div class="flex-1">
+                  <div class="text-[13px]" style="color: var(--text)">加 memory 三层</div>
+                  <div class="text-[10px] mono mt-0.5" style="color: var(--text-dim)">昨天 · 完成 · $0.12</div>
+                </div>
+              </div>
+
+              <div class="flex items-stretch px-3 py-2 rounded-md cursor-pointer">
+                <div class="session-bar mr-2.5" style="background: var(--border)"></div>
+                <div class="flex-1">
+                  <div class="text-[13px]" style="color: var(--text)">(Untitled)</div>
+                  <div class="text-[10px] mono mt-0.5" style="color: var(--text-dim)">3 天前 · 1 turn</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Project 2: collapsed -->
+            <div class="px-2 py-2.5 cursor-pointer">
+              <div class="flex items-center gap-2.5">
+                <i data-lucide="folder" class="w-4 h-4" style="color: var(--text-muted)"></i>
+                <div class="flex-1">
+                  <div class="text-[13px] font-medium" style="color: var(--text)">shulex-gpt</div>
+                  <div class="text-[10px] mono" style="color: var(--text-dim)">~/workspace/.../shulex-gpt</div>
+                </div>
+                <span class="text-[10px] mono px-1.5 py-0.5 rounded" style="background: var(--surface-hi); color: var(--text-muted)">12</span>
+                <i data-lucide="chevron-right" class="w-4 h-4" style="color: var(--text-muted)"></i>
+              </div>
+            </div>
+
+            <div class="px-2 py-2.5 cursor-pointer">
+              <div class="flex items-center gap-2.5">
+                <i data-lucide="folder" class="w-4 h-4" style="color: var(--text-muted)"></i>
+                <div class="flex-1">
+                  <div class="text-[13px] font-medium" style="color: var(--text)">chatflow</div>
+                  <div class="text-[10px] mono" style="color: var(--text-dim)">~/workspace/.../chatflow</div>
+                </div>
+                <span class="text-[10px] mono px-1.5 py-0.5 rounded" style="background: var(--surface-hi); color: var(--text-muted)">3</span>
+                <i data-lucide="chevron-right" class="w-4 h-4" style="color: var(--text-muted)"></i>
+              </div>
+            </div>
+
+            <div class="px-2 py-2.5 cursor-pointer">
+              <div class="flex items-center gap-2.5">
+                <i data-lucide="folder" class="w-4 h-4" style="color: var(--text-muted)"></i>
+                <div class="flex-1">
+                  <div class="text-[13px] font-medium" style="color: var(--text)">agent-builder</div>
+                  <div class="text-[10px] mono" style="color: var(--text-dim)">~/workspace/.../agent-builder</div>
+                </div>
+                <i data-lucide="chevron-right" class="w-4 h-4" style="color: var(--text-muted)"></i>
+              </div>
+            </div>
+          </div>
+
+          <!-- Footer actions -->
+          <div class="hr"></div>
+          <div class="p-1">
+            <div class="px-3 py-2.5 flex items-center gap-3 text-[13px] rounded-md cursor-pointer" style="color: var(--text-muted)">
+              <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+              <span>刷新</span>
+            </div>
+            <div class="px-3 py-2.5 flex items-center gap-3 text-[13px] rounded-md cursor-pointer" style="color: var(--text-muted)">
+              <i data-lucide="settings" class="w-4 h-4"></i>
+              <span>改服务端地址</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="mt-12 text-center text-white/40 text-xs max-w-2xl">
+    设计 token 全部用 CSS 变量定义，切换 dark/light 仅替换变量。Flutter 端落地时 1:1 映射到 ThemeData。
+  </footer>
+
+  <script>
+    lucide.createIcons();
+    function setMode(mode) {
+      document.querySelectorAll('.themed').forEach(el => {
+        el.classList.remove('theme-dark', 'theme-light');
+        el.classList.add('theme-' + mode);
+      });
+      document.getElementById('btnDark').classList.toggle('active', mode === 'dark');
+      document.getElementById('btnLight').classList.toggle('active', mode === 'light');
+    }
+  </script>
+</body>
+</html>
