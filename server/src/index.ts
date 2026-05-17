@@ -8,6 +8,7 @@ import { basename, join, resolve } from 'node:path';
 
 import type { HealthResponse, Project } from '@cc/shared';
 
+import { registerChatRest } from './chat-rest.js';
 import { settings, addProject, removeProject, isPathAllowed, ProjectExistsError } from './config.js';
 import { buildLoggerOptions } from './logger.js';
 import { registerSessionsApi } from './sessions-api.js';
@@ -219,6 +220,9 @@ async function main(): Promise<void> {
 
   // REST: sessions
   await registerSessionsApi(app);
+
+  // REST + SSE: chat (new transport; runs alongside ws-chat during migration)
+  await registerChatRest(app);
 
   // WebSocket: chat
   app.get('/ws/session', { websocket: true }, (socket, req) => {
