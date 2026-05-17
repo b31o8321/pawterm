@@ -12,6 +12,7 @@ export class ChatSession {
   readonly cwd: string;
   readonly permissionMode: PermissionMode;
   readonly resume?: string;
+  readonly sessionId?: string;
   readonly model?: string;
 
   private inputResolver?: (msg: any) => void;
@@ -24,12 +25,14 @@ export class ChatSession {
     cwd: string;
     permissionMode: PermissionMode;
     resume?: string;
+    sessionId?: string;
     model?: string;
     askRegistry: AskUserQuestionRegistry;
   }) {
     this.cwd = opts.cwd;
     this.permissionMode = opts.permissionMode;
     this.resume = opts.resume;
+    this.sessionId = opts.sessionId;
     this.model = opts.model;
     this.askRegistry = opts.askRegistry;
   }
@@ -61,11 +64,19 @@ export class ChatSession {
       permissionMode: this.permissionMode,
       // Emit SDKPartialAssistantMessage events for char-level streaming.
       includePartialMessages: true,
+      // Forward sub-agent (Task tool) text/tool messages with parent_tool_use_id set,
+      // so the client can render a nested transcript inside the Task tool card.
+      forwardSubagentText: true,
       mcpServers: {
         'ask-user-question': makeAskUserMcpServer(this.askRegistry),
       },
       ...(bypassing ? { allowDangerouslySkipPermissions: true } : {}),
-      ...(this.resume ? { resume: this.resume } : {}),
+      // resume takes priority; sessionId is for brand-new sessions only
+      ...(this.resume
+        ? { resume: this.resume }
+        : this.sessionId
+          ? { sessionId: this.sessionId }
+          : {}),
       ...(this.model ? { model: this.model } : {}),
     };
     this.iter = query({ prompt: this.inputGen.call(this), options });
