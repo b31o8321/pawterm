@@ -402,17 +402,17 @@ class _FsRow extends StatelessWidget {
   IconData _iconFor(String name) {
     final lower = name.toLowerCase();
     if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') ||
-        lower.endsWith('.gif') || lower.endsWith('.webp')) return Icons.image_outlined;
-    if (lower.endsWith('.mp4') || lower.endsWith('.mov') || lower.endsWith('.webm')) return Icons.movie_outlined;
-    if (lower.endsWith('.mp3') || lower.endsWith('.wav') || lower.endsWith('.m4a') || lower.endsWith('.flac')) return Icons.audiotrack_outlined;
-    if (lower.endsWith('.pdf')) return Icons.picture_as_pdf_outlined;
-    if (lower.endsWith('.zip') || lower.endsWith('.tar') || lower.endsWith('.gz') || lower.endsWith('.tgz')) return Icons.folder_zip_outlined;
-    if (lower.endsWith('.md') || lower.endsWith('.txt') || lower.endsWith('.log')) return Icons.description_outlined;
+        lower.endsWith('.gif') || lower.endsWith('.webp')) { return Icons.image_outlined; }
+    if (lower.endsWith('.mp4') || lower.endsWith('.mov') || lower.endsWith('.webm')) { return Icons.movie_outlined; }
+    if (lower.endsWith('.mp3') || lower.endsWith('.wav') || lower.endsWith('.m4a') || lower.endsWith('.flac')) { return Icons.audiotrack_outlined; }
+    if (lower.endsWith('.pdf')) { return Icons.picture_as_pdf_outlined; }
+    if (lower.endsWith('.zip') || lower.endsWith('.tar') || lower.endsWith('.gz') || lower.endsWith('.tgz')) { return Icons.folder_zip_outlined; }
+    if (lower.endsWith('.md') || lower.endsWith('.txt') || lower.endsWith('.log')) { return Icons.description_outlined; }
     if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.js') ||
         lower.endsWith('.jsx') || lower.endsWith('.dart') || lower.endsWith('.py') ||
         lower.endsWith('.rs') || lower.endsWith('.go') || lower.endsWith('.java') ||
         lower.endsWith('.kt') || lower.endsWith('.swift') || lower.endsWith('.c') ||
-        lower.endsWith('.cpp') || lower.endsWith('.h') || lower.endsWith('.json')) return Icons.code_outlined;
+        lower.endsWith('.cpp') || lower.endsWith('.h') || lower.endsWith('.json')) { return Icons.code_outlined; }
     return Icons.insert_drive_file_outlined;
   }
 

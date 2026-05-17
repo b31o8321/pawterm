@@ -1,14 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../../api/chat_api.dart';
 import '../../api/protocol.dart';
 import '../../api/sessions_api.dart';
+import '../../api/sse_client.dart';
+import '../../api/upload_api.dart';
 import '../../i18n/locale_provider.dart';
 import '../../i18n/strings.dart';
 import '../../utils/time_format.dart';
@@ -43,6 +48,21 @@ class _HistoryPage {
 
 enum _HolderChoice { takeover, readOnly, cancel }
 
+enum _AttachmentStatus { uploading, ready, failed }
+
+class _AttachmentState {
+  final String localName;
+  final String localPath;
+  String? remotePath;
+  String? errorMsg;
+  _AttachmentStatus status;
+  _AttachmentState({
+    required this.localName,
+    required this.localPath,
+    required this.status,
+  });
+}
+
 class ChatTab extends ConsumerStatefulWidget {
   const ChatTab({super.key});
 
@@ -51,7 +71,9 @@ class ChatTab extends ConsumerStatefulWidget {
 }
 
 class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
-  WebSocketChannel? _channel;
+  ChatApi? _chatApi;
+  SseClient? _sseClient;
+  String? _sessionId;
   final List<IncomingMessage> _messages = [];
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -88,6 +110,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   /// 参考 claude-code messageQueueManager.ts 的单优先级简化版本。
   final List<String> _pending = [];
 
+  /// 待发送的附件：用户从相册/文件选择后立即上传，发送时把 remotePath 拼到消息文本里。
+  /// 上传中/失败的附件会阻塞发送（_attachmentsAllReady=false）。
+  final List<_AttachmentState> _attachments = [];
+
   @override
   void initState() {
     super.initState();
@@ -115,7 +141,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _thoughtForTimer?.cancel();
-    _channel?.sink.close();
+    unawaited(_sseClient?.close() ?? Future.value());
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.close(_sessionId!));
+    }
     _textController.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -125,11 +154,12 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // After app comes back to foreground, force reconnect if socket died.
+      // After app comes back to foreground, force reconnect if SSE stream died.
       if (!_connected && _boundKey != null) {
+        unawaited(_sseClient?.close() ?? Future.value());
         setState(() {
-          _channel?.sink.close();
-          _channel = null;
+          _sseClient = null;
+          _sessionId = null;
           _boundKey = null;
           _error = null;
         });
@@ -140,22 +170,35 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   String _sessionKey(CurrentSession s) =>
       '${s.cwd}|${s.resumeId ?? "new"}|${s.readOnly ? "ro" : "rw"}';
 
-  // Throttle reconnect attempts so a dead server doesn't trigger a tight loop.
-  // Once attempted, only the user-visible "reconnect" button will retry.
+  // Throttle session-start attempts so a dead server doesn't trigger a tight loop.
+  // Once api.start() failed, only the user-visible "reconnect" button will retry.
+  // (SSE drops are handled by SseClient's own backoff loop; this debounce gates
+  // only the initial REST handshake.)
   String? _attemptedKey;
   bool _attempting = false;
 
   void _ensureConnected(CurrentSession session) {
     final key = _sessionKey(session);
-    if (_boundKey == key && (_channel != null || session.readOnly)) return;
+    if (_boundKey == key && (_sseClient != null || session.readOnly)) return;
+    if (_attempting) return; // connection attempt already in-flight
     if (_attemptedKey == key) return; // already tried, don't auto-retry
 
-    _channel?.sink.close();
+    // Tear down any prior SSE/REST session before binding to a new one.
+    final priorSse = _sseClient;
+    final priorApi = _chatApi;
+    final priorId = _sessionId;
+    if (priorSse != null) unawaited(priorSse.close());
+    if (priorId != null && priorApi != null) {
+      unawaited(priorApi.close(priorId));
+    }
+
     _attempting = true;
     _attemptedKey = key;
     setState(() {
       _messages.clear();
-      _channel = null;
+      _sseClient = null;
+      _sessionId = null;
+      _chatApi = null;
       _connected = false;
       _busy = false;
       _error = null;
@@ -174,7 +217,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
 
-    // 只读模式：完全不开 ws，仅通过 HTTP 翻历史。
+    // 只读模式：完全不开传输层，仅通过 HTTP 翻历史。
     if (session.readOnly && session.resumeId != null) {
       _attempting = false;
       _loadHistory(config.httpBase, session.cwd, session.resumeId!);
@@ -183,9 +226,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
     // 普通 resume：先看是否被其他 CLI 进程持有；命中则把决定权交给用户。
     if (session.resumeId != null) {
-      _resumeWithHolderCheck(config.httpBase, config.wsBase, session);
+      _resumeWithHolderCheck(config.httpBase, session);
     } else {
-      _openSessionWebSocket(config.wsBase, session);
+      _openSseSession(config.httpBase, session);
     }
   }
 
@@ -197,7 +240,6 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   ///   - 只读：把 currentSession 切到 readOnly=true 重新走一遍 _ensureConnected。
   Future<void> _resumeWithHolderCheck(
     String httpBase,
-    String wsBase,
     CurrentSession session,
   ) async {
     SessionHolder? holder;
@@ -209,7 +251,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     if (holder == null) {
-      _openSessionWebSocket(wsBase, session);
+      _openSseSession(httpBase, session);
       return;
     }
     // 弹窗
@@ -223,40 +265,58 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
     if (choice == _HolderChoice.takeover) {
-      _openSessionWebSocket(wsBase, session);
+      _openSseSession(httpBase, session);
       return;
     }
     // 取消 / 关闭对话框：什么都不做，停留在空白态。
     _attempting = false;
   }
 
-  void _openSessionWebSocket(String wsBase, CurrentSession session) {
-    // History first — 让用户在 ws 建立期间就能看到历史消息。
-    final conn = ref.read(activeConnectionProvider);
-    if (conn != null && session.resumeId != null) {
-      _loadHistory(conn.httpBase, session.cwd, session.resumeId!);
+  Future<void> _openSseSession(String httpBase, CurrentSession session) async {
+    // History first — 让用户在传输建立期间就能看到历史消息。
+    if (session.resumeId != null) {
+      _loadHistory(httpBase, session.cwd, session.resumeId!);
     }
 
-    final uri = Uri.parse('$wsBase/ws/session');
-    try {
-      _channel = WebSocketChannel.connect(uri);
-    } catch (e) {
-      _attempting = false;
-      setState(() => _error = '$e');
-      return;
-    }
-    _channel!.stream.listen(_onData, onError: _onError, onDone: _onDone);
-
+    final api = ChatApi(httpBase);
+    _chatApi = api;
     final model = ref.read(currentModelProvider);
     final permMode = ref.read(permissionModeProvider);
-    final initMsg = {
-      'type': 'init',
-      'cwd': session.cwd,
-      'permission_mode': permMode.wire,
-      'model': model.id,
-      if (session.resumeId != null) 'resume': session.resumeId,
-    };
-    _channel!.sink.add(jsonEncode(initMsg));
+
+    ChatStartResponse start;
+    try {
+      start = await api.start(
+        cwd: session.cwd,
+        permissionMode: permMode.wire,
+        resume: session.resumeId,
+        model: model.id,
+      );
+    } catch (e) {
+      _attempting = false;
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _chatApi = null;
+      });
+      return;
+    }
+    if (!mounted) {
+      // Tab disposed between start() request and response — clean up.
+      unawaited(api.close(start.sessionId));
+      return;
+    }
+    setState(() {
+      _sessionId = start.sessionId;
+      _connected = true;
+      _attempting = false;
+      _error = null;
+    });
+
+    final sseUrl = Uri.parse('$httpBase/chat/${start.sessionId}/events');
+    final sse = SseClient(url: sseUrl);
+    _sseClient = sse;
+    sse.events.listen(_onSseEvent);
+    unawaited(sse.connect());
   }
 
   Future<_HolderChoice?> _showHolderDialog(SessionHolder holder) async {
@@ -327,15 +387,15 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   void _switchModel(ModelOption m) {
     ref.read(currentModelProvider.notifier).state = m;
-    if (_channel != null && _connected) {
-      _channel!.sink.add(jsonEncode({'type': 'set_model', 'model': m.id}));
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.setModel(_sessionId!, m.id));
     }
   }
 
   void _switchPermissionMode(CcPermissionMode m) {
     ref.read(permissionModeProvider.notifier).set(m);
-    if (_channel != null && _connected) {
-      _channel!.sink.add(jsonEncode({'type': 'set_permission_mode', 'mode': m.wire}));
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.setPermissionMode(_sessionId!, m.wire));
     }
   }
 
@@ -459,9 +519,17 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _manualReconnect() {
+    final priorSse = _sseClient;
+    final priorApi = _chatApi;
+    final priorId = _sessionId;
+    if (priorSse != null) unawaited(priorSse.close());
+    if (priorId != null && priorApi != null) {
+      unawaited(priorApi.close(priorId));
+    }
     setState(() {
-      _channel?.sink.close();
-      _channel = null;
+      _sseClient = null;
+      _sessionId = null;
+      _chatApi = null;
       _boundKey = null;
       _attemptedKey = null;
       _attempting = false;
@@ -469,9 +537,46 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     });
   }
 
-  void _onData(dynamic raw) {
-    if (raw is! String) return;
-    final json = jsonDecode(raw) as Map<String, dynamic>;
+  void _onSseEvent(SseEvent ev) {
+    // Internal transport signals come through with a `__` prefix; surface them
+    // as connection-level state changes rather than wire messages.
+    if (ev.type.startsWith('__')) {
+      if (ev.type == '__gap') {
+        if (!mounted) return;
+        setState(() {
+          _error = 'event gap, reloading…';
+          _connected = false;
+        });
+      } else if (ev.type == '__client_error') {
+        // Transient — the SSE client will retry. Surface the latest error.
+        if (!mounted) return;
+        setState(() {
+          _error = ev.data;
+          _connected = false;
+        });
+      }
+      return;
+    }
+    // Heartbeats etc. emit blank data; skip safely.
+    if (ev.data.isEmpty) return;
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(ev.data) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    // First wire message after reconnect (re)confirms the live stream.
+    if (!_connected && mounted) {
+      setState(() {
+        _connected = true;
+        _error = null;
+      });
+    }
+    _handleWireMessage(json);
+  }
+
+  void _handleWireMessage(Map<String, dynamic> json) {
+    if (!mounted) return;
     final msg = IncomingMessage.fromJson(json);
     setState(() {
       if (msg is SessionReady) {
@@ -585,25 +690,6 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     _scrollToEnd();
   }
 
-  void _onError(Object e) {
-    _attempting = false;
-    setState(() {
-      _error = e.toString();
-      _connected = false;
-      _channel = null;
-    });
-  }
-
-  void _onDone() {
-    _attempting = false;
-    setState(() {
-      _connected = false;
-      _busy = false;
-      _busyStartedAt = null;
-      _channel = null;
-    });
-  }
-
   /// 滚动到底部。
   /// - [force] = true：无论 _stickToBottom 是什么都强制滚（用于浮动按钮 / 提交消息后）
   /// - [force] = false（默认）：仅在当前已经"贴底"时滚（用于流式 delta 自动跟随）
@@ -621,9 +707,21 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _submit() {
-    final text = _textController.text.trim();
-    if (text.isEmpty || !_connected) return;
+    if (!_connected) return;
+    // 任何附件没就绪（uploading/failed）就不让发，UI 上 send 按钮已 disabled
+    // —— 这里二次防御，避免极端情况下漏掉一条 ref。
+    if (!_attachmentsAllReady) return;
+    final raw = _textController.text.trim();
+    final attachLines = _attachments
+        .where((a) => a.status == _AttachmentStatus.ready && a.remotePath != null)
+        .map((a) => '`${a.remotePath!}`')
+        .toList();
+    final text = attachLines.isEmpty
+        ? raw
+        : '$raw\n\n附件：\n${attachLines.join('\n')}';
+    if (text.isEmpty) return;
     _textController.clear();
+    setState(() => _attachments.clear());
     // busy 时排队，否则直接发。result 到达 → _drainQueue 出队继续。
     if (_busy) {
       setState(() => _pending.add(text));
@@ -633,7 +731,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     _sendNow(text);
   }
 
-  /// 实际把一条 user_message 发到 ws，并设置 busy / spinner 状态。
+  /// 实际把一条 user_message 发到 server，并设置 busy / spinner 状态。
   /// 已经假设 !_busy。调用者应自己处理排队。
   void _sendNow(String text) {
     setState(() {
@@ -645,7 +743,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _thoughtSeconds = null;
       _thoughtForTimer?.cancel();
     });
-    _channel?.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.sendMessage(_sessionId!, text));
+    }
     _scrollToEnd(force: true);
   }
 
@@ -663,8 +763,77 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _interrupt() {
-    if (_busy) _channel?.sink.add(jsonEncode({'type': 'interrupt'}));
+    if (_busy && _sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.interrupt(_sessionId!));
+    }
   }
+
+  /// 把用户对 AskUserQuestion 工具的回答通过 REST 发给 server。
+  void _sendAnswerQuestion(
+    String toolUseId,
+    Map<String, String> answers,
+    Map<String, Map<String, String>>? annotations,
+  ) {
+    if (_sessionId == null || _chatApi == null) return;
+    unawaited(_chatApi!.answerQuestion(_sessionId!, toolUseId, answers, annotations));
+  }
+
+  /// 弹文件选择器，把每个选中的文件都登记为 uploading 状态并启动并发上传。
+  Future<void> _pickAndUploadAttachments() async {
+    final result = await FilePicker.platform.pickFiles(allowMultiple: true);
+    if (result == null) return;
+    final session = ref.read(currentSessionProvider);
+    if (session == null) return;
+    final config = ref.read(activeConnectionProvider);
+    if (config == null) return;
+    final api = UploadApi(config.httpBase);
+    for (final pickedFile in result.files) {
+      final path = pickedFile.path;
+      if (path == null) continue;
+      final state = _AttachmentState(
+        localName: pickedFile.name,
+        localPath: path,
+        status: _AttachmentStatus.uploading,
+      );
+      setState(() => _attachments.add(state));
+      unawaited(_uploadOne(api, state, session.cwd));
+    }
+  }
+
+  Future<void> _uploadOne(UploadApi api, _AttachmentState state, String cwd) async {
+    try {
+      final result = await api.upload(File(state.localPath), cwd);
+      if (!mounted) return;
+      setState(() {
+        state.remotePath = result.path;
+        state.status = _AttachmentStatus.ready;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        state.errorMsg = e.toString();
+        state.status = _AttachmentStatus.failed;
+      });
+    }
+  }
+
+  void _removeAttachment(_AttachmentState a) {
+    setState(() => _attachments.remove(a));
+  }
+
+  Future<void> _retryAttachment(_AttachmentState a) async {
+    final session = ref.read(currentSessionProvider);
+    final config = ref.read(activeConnectionProvider);
+    if (session == null || config == null) return;
+    setState(() {
+      a.status = _AttachmentStatus.uploading;
+      a.errorMsg = null;
+    });
+    await _uploadOne(UploadApi(config.httpBase), a, session.cwd);
+  }
+
+  bool get _attachmentsAllReady =>
+      _attachments.every((a) => a.status == _AttachmentStatus.ready);
 
   @override
   Widget build(BuildContext context) {
@@ -751,7 +920,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
                           return _UserMessage(text: m.text, timestamp: m.timestamp);
                         }
                         if (m is StreamingAssistant) return _StreamingMessage(buffer: m);
-                        return MessageView(message: m, toolResults: toolResults);
+                        return MessageView(
+                          message: m,
+                          toolResults: toolResults,
+                          onAnswerQuestion: _sendAnswerQuestion,
+                        );
                       },
                     ),
               // Right-bottom "jump to bottom" button — only shown when the user
@@ -778,10 +951,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           )
         else if (ref.watch(todoListProvider).isNotEmpty)
           // 非 streaming 也要看到任务进度条 —— 单独占一行
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 12, 4),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 4, 12, 4),
             child: Row(
-              children: const [Spacer(), TodoChip()],
+              children: [Spacer(), TodoChip()],
             ),
           ),
         if (_pending.isNotEmpty)
@@ -795,6 +968,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             controller: _textController,
             connected: _connected,
             busy: _busy,
+            attachments: _attachments,
+            attachmentsAllReady: _attachmentsAllReady,
+            onPickAttachment: _pickAndUploadAttachments,
+            onRemoveAttachment: _removeAttachment,
+            onRetryAttachment: _retryAttachment,
             onSubmit: _submit,
             onStop: _interrupt,
             onSwitchModel: _switchModel,
@@ -987,6 +1165,11 @@ class _Composer extends ConsumerWidget {
   final TextEditingController controller;
   final bool connected;
   final bool busy;
+  final List<_AttachmentState> attachments;
+  final bool attachmentsAllReady;
+  final VoidCallback onPickAttachment;
+  final void Function(_AttachmentState) onRemoveAttachment;
+  final void Function(_AttachmentState) onRetryAttachment;
   final VoidCallback onSubmit;
   final VoidCallback onStop;
   final void Function(ModelOption) onSwitchModel;
@@ -995,6 +1178,11 @@ class _Composer extends ConsumerWidget {
     required this.controller,
     required this.connected,
     required this.busy,
+    required this.attachments,
+    required this.attachmentsAllReady,
+    required this.onPickAttachment,
+    required this.onRemoveAttachment,
+    required this.onRetryAttachment,
     required this.onSubmit,
     required this.onStop,
     required this.onSwitchModel,
@@ -1005,7 +1193,8 @@ class _Composer extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
     final model = ref.watch(currentModelProvider);
-    final canSend = connected && !busy;
+    // 任意附件没就绪（上传中/失败）都禁止发送，避免发出去的引用不可达。
+    final canSend = connected && !busy && attachmentsAllReady;
     final editable = connected; // 文本框 busy 时仍可编辑（用户能预写下一条），但发送被 stop 按钮替代。
     return SafeArea(
       top: false,
@@ -1020,7 +1209,25 @@ class _Composer extends ConsumerWidget {
           padding: const EdgeInsets.fromLTRB(12, 8, 8, 6),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 附件 chip 行：非空时显示在输入框上方。
+              if (attachments.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8, right: 8),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final a in attachments)
+                        _AttachmentChip(
+                          state: a,
+                          onRemove: () => onRemoveAttachment(a),
+                          onRetry: () => onRetryAttachment(a),
+                        ),
+                    ],
+                  ),
+                ),
               // 输入框 + 发送/停止按钮：纵向居中。
               Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
@@ -1058,9 +1265,24 @@ class _Composer extends ConsumerWidget {
                 ],
               ),
               const SizedBox(height: 4),
-              // 工具栏在按钮下方，左对齐。
+              // 工具栏在按钮下方，左对齐。最左边是 + 按钮（附件上传）。
               Row(
                 children: [
+                  GestureDetector(
+                    onTap: connected ? onPickAttachment : null,
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      alignment: Alignment.center,
+                      child: Icon(
+                        Icons.add_rounded,
+                        size: 20,
+                        color: connected ? t.textMuted : t.textDim,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
                   _PermissionModePicker(
                     current: ref.watch(permissionModeProvider),
                     onPick: onSwitchPermissionMode,
@@ -1077,11 +1299,11 @@ class _Composer extends ConsumerWidget {
   }
 }
 
-/// 输入框右侧的 44×44 圆角方块按钮。
-/// - busy=false → 发送箭头，accent 色
-/// - busy=true  → 停止方块，红色
-/// - 不可用    → 灰
-class _SendOrStopButton extends StatelessWidget {
+/// 输入框右侧的 40×40 圆形按钮（黑白主题，对照 cxclaw）。
+/// - busy=false → 发送上箭头
+/// - busy=true  → 停止方块（同一种背景，仅图标变）
+/// - 不可用    → 浅灰
+class _SendOrStopButton extends StatefulWidget {
   final bool busy;
   final bool canSend;
   final VoidCallback onSubmit;
@@ -1094,26 +1316,74 @@ class _SendOrStopButton extends StatelessWidget {
   });
 
   @override
+  State<_SendOrStopButton> createState() => _SendOrStopButtonState();
+}
+
+class _SendOrStopButtonState extends State<_SendOrStopButton> {
+  bool _pressed = false;
+
+  @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
-    final bg = busy
-        ? t.error
-        : (canSend ? t.accent : t.surfaceHi);
-    final fg = (busy || canSend) ? Colors.white : t.textDim;
-    final radius = BorderRadius.circular(12);
-    return Material(
-      color: bg,
-      borderRadius: radius,
-      child: InkWell(
-        borderRadius: radius,
-        onTap: busy ? onStop : (canSend ? onSubmit : null),
+    final dark = Theme.of(context).brightness == Brightness.dark;
+
+    // 主题色：亮模式黑底，暗模式近白底。按下时 / 不可用时颜色降级。
+    final Color bg;
+    final Color fg;
+    if (!widget.canSend && !widget.busy) {
+      bg = dark ? t.borderSubt : const Color(0xFFE4E7EC);
+      fg = dark ? t.textDim : const Color(0xFF98A2B3);
+    } else {
+      bg = dark ? t.text : const Color(0xFF101828);
+      fg = dark ? const Color(0xFF0B1210) : Colors.white;
+    }
+
+    return GestureDetector(
+      onTapDown: (_) {
+        HapticFeedback.lightImpact();
+        setState(() => _pressed = true);
+      },
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTap: widget.busy
+          ? widget.onStop
+          : (widget.canSend ? widget.onSubmit : null),
+      child: AnimatedScale(
+        scale: _pressed ? 0.96 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.easeOut,
         child: SizedBox(
           width: 44,
           height: 44,
-          child: Icon(
-            busy ? Icons.stop_rounded : Icons.arrow_upward_rounded,
-            size: 22,
-            color: fg,
+          child: Center(
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: bg,
+                shape: BoxShape.circle,
+                boxShadow: dark
+                    ? null
+                    : [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.15),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+              ),
+              alignment: Alignment.center,
+              child: widget.busy
+                  ? Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: fg,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    )
+                  : Icon(Icons.arrow_upward_rounded, size: 18, color: fg),
+            ),
           ),
         ),
       ),
@@ -1487,6 +1757,96 @@ class _PermissionModeRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 附件 chip：固定 28pt 高，左侧显示文件类型图标 + 文件名（最多 200pt 截断），
+/// 右侧根据上传状态显示菊花 / 错误 ! / 关闭 × 三种态。
+/// - uploading：1.5pt 圆形 spinner
+/// - failed：t.error 图标，点击触发重传
+/// - ready：t.textMuted close 图标，点击从列表移除
+class _AttachmentChip extends StatelessWidget {
+  final _AttachmentState state;
+  final VoidCallback onRemove;
+  final VoidCallback onRetry;
+  const _AttachmentChip({
+    required this.state,
+    required this.onRemove,
+    required this.onRetry,
+  });
+
+  IconData _iconForName(String name) {
+    final lower = name.toLowerCase();
+    if (RegExp(r'\.(png|jpg|jpeg|webp|heic|heif|gif|bmp)$').hasMatch(lower)) {
+      return Icons.image_outlined;
+    }
+    if (lower.endsWith('.pdf')) return Icons.picture_as_pdf_outlined;
+    if (RegExp(r'\.(ts|tsx|js|jsx|py|dart|go|rs|java|c|cpp|h|hpp|json|yaml|yml|md|sh)$').hasMatch(lower)) {
+      return Icons.code;
+    }
+    return Icons.insert_drive_file_outlined;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final failed = state.status == _AttachmentStatus.failed;
+    return Container(
+      height: 28,
+      padding: const EdgeInsets.only(left: 8, right: 4),
+      decoration: BoxDecoration(
+        color: t.surfaceHi,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: failed ? t.error.withValues(alpha: 0.5) : t.border,
+          width: 0.5,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(_iconForName(state.localName), size: 14, color: t.textMuted),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 200),
+            child: Text(
+              state.localName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: t.text),
+            ),
+          ),
+          const SizedBox(width: 6),
+          if (state.status == _AttachmentStatus.uploading)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 2),
+              child: SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              ),
+            )
+          else if (failed)
+            GestureDetector(
+              onTap: onRetry,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(Icons.error_outline, size: 14, color: t.error),
+              ),
+            )
+          else
+            GestureDetector(
+              onTap: onRemove,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(Icons.close_rounded, size: 14, color: t.textMuted),
+              ),
+            ),
+        ],
       ),
     );
   }

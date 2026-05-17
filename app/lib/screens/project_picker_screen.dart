@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../api/projects_api.dart';
 import '../api/sessions_api.dart';
+import '../main.dart' show routeObserver;
 import '../state/projects_store.dart';
 import '../state/server_config.dart';
 import '../theme.dart';
@@ -22,7 +23,8 @@ class ProjectPickerScreen extends ConsumerStatefulWidget {
 
 enum _PhaseStatus { connecting, ready, failed }
 
-class _ProjectPickerScreenState extends ConsumerState<ProjectPickerScreen> {
+class _ProjectPickerScreenState extends ConsumerState<ProjectPickerScreen>
+    with RouteAware {
   final Set<String> _expanded = {};
   _PhaseStatus _phase = _PhaseStatus.connecting;
   String? _connectError;
@@ -31,6 +33,34 @@ class _ProjectPickerScreenState extends ConsumerState<ProjectPickerScreen> {
   void initState() {
     super.initState();
     _checkConnection();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 订阅当前 Route 的生命周期 — 用户 push 进 MainShell 再 pop 回来时
+    // didPopNext 会被调用，用于刷新 session 列表。
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<dynamic>) {
+      routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void dispose() {
+    routeObserver.unsubscribe(this);
+    super.dispose();
+  }
+
+  @override
+  void didPopNext() {
+    // 从 MainShell 返回到 ProjectPickerScreen 那一刻：
+    // 用户可能新建/续上了某个 session，把 title/last-modified 更新了。
+    // sessionsProvider 默认会缓存——这里强制让所有已展开项目重新拉取。
+    // 未展开的项目不动（首次展开时本来就会触发 fetch）。
+    for (final path in _expanded) {
+      ref.invalidate(sessionsProvider(path));
+    }
   }
 
   Future<void> _checkConnection() async {

@@ -3,6 +3,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../api/protocol.dart';
 import '../theme.dart';
+import 'ask_user_question.dart';
 import 'tool_call_card.dart';
 
 class MessageView extends StatelessWidget {
@@ -10,8 +11,19 @@ class MessageView extends StatelessWidget {
   /// tool_use_id → ToolResultBlock 索引（由 ChatTab 提前扫一遍消息列表得到）。
   /// 让 ToolUseBlock 渲染时能找到对应 result，合并成一个折叠卡。
   final Map<String, ToolResultBlock>? toolResults;
+  /// 提交 AskUserQuestion 答案的回调（仅 AskUserQuestion 工具需要）。
+  final void Function(
+    String toolUseId,
+    Map<String, String> answers,
+    Map<String, Map<String, String>>? annotations,
+  )? onAnswerQuestion;
 
-  const MessageView({super.key, required this.message, this.toolResults});
+  const MessageView({
+    super.key,
+    required this.message,
+    this.toolResults,
+    this.onAnswerQuestion,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -161,6 +173,13 @@ class MessageView extends StatelessWidget {
     }
 
     if (block is ToolUseBlock) {
+      if (block.name.endsWith('AskUserQuestion') && onAnswerQuestion != null) {
+        return AskUserQuestionWidget(
+          toolUse: block,
+          answeredResult: toolResults?[block.id],
+          onSubmit: onAnswerQuestion!,
+        );
+      }
       return ToolCallCard(
         toolUse: block,
         result: toolResults?[block.id],

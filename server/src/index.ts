@@ -1,4 +1,5 @@
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import websocketPlugin from '@fastify/websocket';
 import Fastify from 'fastify';
 import { createReadStream } from 'node:fs';
@@ -8,10 +9,11 @@ import { basename, join, resolve } from 'node:path';
 
 import type { HealthResponse, Project } from '@cc/shared';
 
+import { registerChatRest } from './chat-rest.js';
 import { settings, addProject, removeProject, isPathAllowed, ProjectExistsError } from './config.js';
 import { buildLoggerOptions } from './logger.js';
 import { registerSessionsApi } from './sessions-api.js';
-import { handleChatSocket } from './ws-chat.js';
+import { registerUpload } from './upload.js';
 import { handleShellSocket } from './ws-shell.js';
 
 const VERSION = '0.2.0';
@@ -21,6 +23,7 @@ async function main(): Promise<void> {
 
   await app.register(cors, { origin: true });
   await app.register(websocketPlugin);
+  await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024 } });
 
   // REST: health
   app.get('/health', async (): Promise<HealthResponse> => ({ status: 'ok', version: VERSION, hostname: hostname() }));
@@ -220,10 +223,11 @@ async function main(): Promise<void> {
   // REST: sessions
   await registerSessionsApi(app);
 
-  // WebSocket: chat
-  app.get('/ws/session', { websocket: true }, (socket, req) => {
-    handleChatSocket(socket, req);
-  });
+  // REST + SSE: chat
+  await registerChatRest(app);
+
+  // REST: upload (chat attachments)
+  await registerUpload(app);
 
   // WebSocket: shell
   app.get('/ws/shell', { websocket: true }, (socket, req) => {

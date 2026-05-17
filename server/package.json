@@ -5,23 +5,34 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:test": "CC_CONFIG=$(pwd)/config.test.json tsx src/index.ts",
+    "test-server:start": "./scripts/test-server.sh start",
+    "test-server:stop": "./scripts/test-server.sh stop",
+    "test-server:restart": "./scripts/test-server.sh restart",
+    "test-server:status": "./scripts/test-server.sh status",
+    "test-server:logs": "./scripts/test-server.sh logs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "postinstall": "node scripts/fix-pty-perms.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.141",
     "@cc/shared": "workspace:*",
     "@fastify/cors": "^11.0.0",
+    "@fastify/multipart": "^10.0.0",
     "@fastify/websocket": "^11.0.0",
     "fastify": "^5.8.5",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "pino-pretty": "^11.3.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.6"
   }
 }

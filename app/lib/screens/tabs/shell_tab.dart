@@ -26,6 +26,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
   final TerminalController _controller = TerminalController();
   bool _ctrlSticky = false;
   bool _altSticky = false;
+  // ignore: unused_field  // tracks ready state; read-path wired up in future reconnect UI
   bool _connected = false;
   bool _searching = false;
   String? _error;
@@ -45,6 +46,7 @@ class _ShellTabState extends ConsumerState<ShellTab> {
   bool _shellAttempting = false;
 
   void _ensureConnectedFor(String cwd) {
+    if (_shellAttempting) return; // connection attempt already in-flight
     if (_attemptedCwd == cwd) return;
 
     _channel?.sink.close();
