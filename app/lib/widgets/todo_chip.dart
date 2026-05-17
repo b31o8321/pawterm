@@ -133,9 +133,7 @@ class _TodoChipState extends ConsumerState<TodoChip>
   late final AnimationController _outCtrl;
   late final Animation<double> _fadeOut;
 
-  int _lastSeenUpdate = 0;
   List<TodoItem> _cachedTodos = []; // last non-empty snapshot for vanish frame
-  List<TodoItem> _prevTodos = [];
   bool _vanishing = false;
   bool _gone = false;
   final _chipKey = GlobalKey();
@@ -181,12 +179,6 @@ class _TodoChipState extends ConsumerState<TodoChip>
     super.dispose();
   }
 
-  void _maybeAnimate(int updatedAt) {
-    if (updatedAt == _lastSeenUpdate || _vanishing) return;
-    if (_lastSeenUpdate != 0) _pulseCtrl.forward(from: 0);
-    _lastSeenUpdate = updatedAt;
-  }
-
   void _triggerVanish(BuildContext context) {
     if (_vanishing || _gone || !mounted) return;
 
@@ -228,37 +220,35 @@ class _TodoChipState extends ConsumerState<TodoChip>
     final t = AppTokens.of(context);
     final s = ref.watch(stringsProvider);
     final todos = ref.watch(todoListProvider);
-    final updatedAt = ref.watch(todoUpdatedAtProvider);
+
+    // Pulse 动效：只在 provider 值真正变化时触发，不在每次 build 时触发
+    ref.listen<int>(todoUpdatedAtProvider, (prev, next) {
+      if (_vanishing || !mounted) return;
+      _pulseCtrl.forward(from: 0);
+    });
+
+    // 状态迁移：列表清空 → 烟花 + 淡出；任务回来 → 重置显示
+    ref.listen<List<TodoItem>>(todoListProvider, (prev, next) {
+      if (!_vanishing && !_gone && (prev?.isNotEmpty ?? false) && next.isEmpty) {
+        // 需要先等 layout 完成才能拿到 chip 位置
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _triggerVanish(context);
+        });
+      }
+      if (_gone && next.isNotEmpty) {
+        setState(() {
+          _gone = false;
+          _vanishing = false;
+        });
+        _outCtrl.reset();
+      }
+    });
 
     // Keep a copy of the last non-empty list so the chip can render during vanish
     if (todos.isNotEmpty) _cachedTodos = todos;
 
-    // Detect transition to empty → schedule vanish
-    if (!_vanishing && !_gone && _prevTodos.isNotEmpty && todos.isEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _triggerVanish(context);
-      });
-    }
-    _prevTodos = todos;
-
-    // Detect todos coming back after being gone (new task round)
-    if (_gone && todos.isNotEmpty) {
-      _gone = false;
-      _vanishing = false;
-      _outCtrl.reset();
-    }
-
     if (_gone) return const SizedBox.shrink();
     if (todos.isEmpty && !_vanishing) return const SizedBox.shrink();
-
-    // Pulse (skip during vanish)
-    if (_lastSeenUpdate == 0) {
-      _lastSeenUpdate = updatedAt;
-    } else if (!_vanishing) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _maybeAnimate(updatedAt);
-      });
-    }
 
     final renderTodos = _vanishing ? _cachedTodos : todos;
     if (renderTodos.isEmpty) return const SizedBox.shrink();
@@ -357,76 +347,90 @@ class _TodoSheet extends ConsumerWidget {
     final done = todos.where((e) => e.isCompleted).length;
     final panelWidth =
         (MediaQuery.of(context).size.width * 0.82).clamp(0.0, 340.0);
-    return Align(
-      alignment: Alignment.centerRight,
-      child: SafeArea(
-        child: Container(
-          width: panelWidth,
-          margin: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: t.surface,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: t.border),
-          ),
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 20, 16, 12),
-                child: Row(
-                  children: [
-                    Icon(Icons.checklist, size: 16, color: t.accent),
-                    const SizedBox(width: 8),
-                    Text(
-                      s.todoSheetTitle,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: t.text,
-                      ),
-                    ),
-                    const Spacer(),
-                    if (todos.isNotEmpty)
-                      Text(
-                        '$done / ${todos.length}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: t.textDim,
-                          fontFamily: 'monospace',
+    // Align 会向子节点传递 loose 约束，导致 Column > Expanded 在
+    // showGeneralDialog 的 pageBuilder 里拿到无界高度而崩溃。
+    // 改用 Stack + Positioned(top/bottom) 来提供有界的紧约束。
+    return Stack(
+      children: [
+        Positioned(
+          top: 0,
+          bottom: 0,
+          right: 0,
+          width: panelWidth + 16, // +16 吸收两侧 padding(8+8)
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: t.surface,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: t.border),
+                  ),
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 20, 16, 12),
+                        child: Row(
+                          children: [
+                            Icon(Icons.checklist, size: 16, color: t.accent),
+                            const SizedBox(width: 8),
+                            Text(
+                              s.todoSheetTitle,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: t.text,
+                              ),
+                            ),
+                            const Spacer(),
+                            if (todos.isNotEmpty)
+                              Text(
+                                '$done / ${todos.length}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: t.textDim,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            const SizedBox(width: 8),
+                            InkWell(
+                              onTap: () => Navigator.of(context).pop(),
+                              borderRadius: BorderRadius.circular(6),
+                              child: Padding(
+                                padding: const EdgeInsets.all(4),
+                                child: Icon(Icons.close, size: 16, color: t.textDim),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                    const SizedBox(width: 8),
-                    InkWell(
-                      onTap: () => Navigator.of(context).pop(),
-                      borderRadius: BorderRadius.circular(6),
-                      child: Padding(
-                        padding: const EdgeInsets.all(4),
-                        child: Icon(Icons.close, size: 16, color: t.textDim),
+                      Divider(color: t.borderSubt, height: 0.5),
+                      Expanded(
+                        child: todos.isEmpty
+                            ? Center(
+                                child: Text(
+                                  s.todoEmpty,
+                                  style: TextStyle(fontSize: 13, color: t.textDim),
+                                ),
+                              )
+                            : ListView.separated(
+                                padding: const EdgeInsets.symmetric(vertical: 4),
+                                itemCount: todos.length,
+                                separatorBuilder: (_, __) => Divider(
+                                    color: t.borderSubt, height: 0.5, indent: 50),
+                                itemBuilder: (_, i) => _TodoRow(item: todos[i]),
+                              ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-              Divider(color: t.borderSubt, height: 0.5),
-              Expanded(
-                child: todos.isEmpty
-                    ? Center(
-                        child: Text(
-                          s.todoEmpty,
-                          style: TextStyle(fontSize: 13, color: t.textDim),
-                        ),
-                      )
-                    : ListView.separated(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        itemCount: todos.length,
-                        separatorBuilder: (_, __) =>
-                            Divider(color: t.borderSubt, height: 0.5, indent: 50),
-                        itemBuilder: (_, i) => _TodoRow(item: todos[i]),
-                      ),
-              ),
-            ],
+            ),
           ),
         ),
-      ),
+      ],
     );
   }
 }

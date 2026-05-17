@@ -318,6 +318,18 @@ class MessageView extends StatelessWidget {
           onSubmit: onAnswerQuestion!,
         );
       }
+      // TodoWrite 中间状态完全隐藏（只显示首次创建 0/N 和全部完成 N/N 这两次）。
+      // 注意：这里必须在实例化 ToolCallCard 之前判断；_gutterRow 检查的是 widget
+      // 实例类型，ToolCallCard 实例永远不是 SizedBox，所以必须在此层拦截。
+      if (block.name == 'TodoWrite') {
+        final rawList = block.input['todos'] as List<dynamic>? ?? const [];
+        final total = rawList.length;
+        final completed =
+            rawList.where((e) => (e as Map)['status'] == 'completed').length;
+        if (total == 0 || (completed > 0 && completed < total)) {
+          return const SizedBox.shrink();
+        }
+      }
       return ToolCallCard(
         toolUse: block,
         result: result,
