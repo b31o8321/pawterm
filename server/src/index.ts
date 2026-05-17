@@ -139,6 +139,59 @@ async function main(): Promise<void> {
     }
   });
 
+  /**
+   * Read a text file inline for preview. Reject anything that:
+   *   - is not a regular file
+   *   - is outside the whitelisted project roots
+   *   - exceeds [maxBytes] (default 5 MB) — for big files the client should
+   *     fall back to /fs/download instead.
+   * Returns `{ path, size, text, truncated, binary? }`. If the file looks
+   * binary we return `{ binary: true }` without `text` — client decides.
+   */
+  app.get<{ Querystring: { path?: string; max_bytes?: string } }>('/fs/cat', async (req, reply) => {
+    const p = req.query.path;
+    if (!p) { reply.code(400); return { error: 'path required' }; }
+    const abs = resolve(p.replace(/^~/, homedir()));
+    if (!isPathAllowed(abs)) { reply.code(403); return { error: 'path not allowed' }; }
+    const maxBytes = Math.min(
+      20 * 1024 * 1024,
+      Math.max(1024, Number(req.query.max_bytes ?? 5 * 1024 * 1024)),
+    );
+    try {
+      const st = await stat(abs);
+      if (!st.isFile()) { reply.code(400); return { error: 'not a file' }; }
+      const truncated = st.size > maxBytes;
+      const { readFile } = await import('node:fs/promises');
+      const buf = truncated
+        ? await readFile(abs).then((b) => b.subarray(0, maxBytes))
+        : await readFile(abs);
+      // 简单嗅探二进制：前 8KB 含 NUL 或大量 < 0x20 非 ASCII 字符
+      const head = buf.subarray(0, Math.min(buf.length, 8 * 1024));
+      let nul = 0;
+      let ctrl = 0;
+      for (let i = 0; i < head.length; i++) {
+        const c = head[i]!;
+        if (c === 0) nul++;
+        else if (c < 0x09 || (c > 0x0d && c < 0x20)) ctrl++;
+      }
+      const binary = nul > 0 || ctrl / Math.max(1, head.length) > 0.05;
+      if (binary) {
+        return { path: abs, size: st.size, binary: true };
+      }
+      return {
+        path: abs,
+        size: st.size,
+        truncated,
+        text: buf.toString('utf-8'),
+      };
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') { reply.code(404); return { error: 'not found' }; }
+      reply.code(500);
+      return { error: e.message };
+    }
+  });
+
   app.get<{ Querystring: { path?: string } }>('/fs/download', async (req, reply) => {
     const p = req.query.path;
     if (!p) { reply.code(400); return { error: 'path required' }; }

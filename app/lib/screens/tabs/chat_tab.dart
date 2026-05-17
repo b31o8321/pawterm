@@ -15,9 +15,11 @@ import '../../utils/time_format.dart';
 import '../../state/prefs.dart';
 import '../../state/projects_store.dart';
 import '../../state/server_config.dart';
+import '../../state/todo_list.dart';
 import '../../theme.dart';
 import '../../widgets/cc_spinner.dart';
 import '../../widgets/message_view.dart';
+import '../../widgets/todo_chip.dart';
 
 class LocalUserInput extends IncomingMessage {
   final String text;
@@ -77,6 +79,14 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   String? _oldestUuid;
   bool _hasMoreHistory = false;
   bool _loadingOlder = false;
+  /// 首屏历史加载中（resume 一个已有会话时为 true，直到第一页返回）。
+  /// 用来区分"连接中"vs"加载历史中"，避免显示"开始对话"占位。
+  bool _loadingHistory = false;
+
+  /// 流式中用户继续提交的消息，按 FIFO 排队。
+  /// busy 解除（result 到达）后自动出队、依次发送。
+  /// 参考 claude-code messageQueueManager.ts 的单优先级简化版本。
+  final List<String> _pending = [];
 
   @override
   void initState() {
@@ -153,7 +163,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _oldestUuid = null;
       _hasMoreHistory = false;
       _loadingOlder = false;
+      _loadingHistory = false;
     });
+    // 切换会话时清空之前的 todo（每个 session 各自一份）
+    ref.read(todoListProvider.notifier).clear();
 
     final config = ref.read(activeConnectionProvider);
     if (config == null) {
@@ -328,22 +341,33 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   /// 首屏加载：最后 [_historyPageSize] 条消息。
   Future<void> _loadHistory(String httpBase, String cwd, String sessionId) async {
+    // 给骨架屏一个最少展示时长，避免 fetch 太快"闪一下"
+    final minShowUntil = DateTime.now().add(const Duration(milliseconds: 280));
+    setState(() => _loadingHistory = true);
     try {
       final page = await _fetchHistoryPage(
         httpBase, cwd, sessionId,
         limit: _historyPageSize,
       );
-      if (page == null || !mounted) return;
-      setState(() {
-        _messages
-          ..clear()
-          ..addAll(page.messages);
-        _oldestUuid = page.oldestUuid;
-        _hasMoreHistory = page.hasMore;
-      });
-      _scrollToEnd(force: true);
+      if (!mounted) return;
+      final remaining = minShowUntil.difference(DateTime.now());
+      if (remaining > Duration.zero) await Future.delayed(remaining);
+      if (!mounted) return;
+      if (page != null) {
+        setState(() {
+          _messages
+            ..clear()
+            ..addAll(page.messages);
+          _oldestUuid = page.oldestUuid;
+          _hasMoreHistory = page.hasMore;
+          _loadingHistory = false;
+        });
+        _scrollToEnd(force: true);
+      } else {
+        setState(() => _loadingHistory = false);
+      }
     } catch (_) {
-      // History fetch failure is non-fatal — just skip.
+      if (mounted) setState(() => _loadingHistory = false);
     }
   }
 
@@ -454,6 +478,14 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         _attempting = false;
         _connected = true;
         _error = null;
+        // 服务端在 attach 一个 in-flight session：立刻恢复 streaming UI，
+        // 不必等下一个 stream_block_start。后续的 outputBuffer replay 会
+        // 把当前 turn 的所有事件补齐。
+        if (msg.busy) {
+          _busy = true;
+          _busyStartedAt ??= DateTime.now();
+          _mode = CcStreamMode.responding;
+        }
       } else if (msg is ResultMsg) {
         _busy = false;
         _busyStartedAt = null;
@@ -462,6 +494,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         _thoughtSeconds = null;
         _currentBlockKind = null;
         _messages.add(msg);
+        // 当前轮结束 — 看看队列里有没有用户在 busy 期间堆的消息，
+        // 有就出队继续发（递归触发下一轮）。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _drainQueue();
+        });
       } else if (msg is ErrorMsg) {
         _error = msg.message;
         _messages.add(msg);
@@ -523,6 +560,19 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           _messages.removeLast();
         }
         _messages.add(msg);
+        // 拦截 TodoWrite 工具调用 → 更新全局 todoListProvider，让顶部 chip 反映进度。
+        // 注意：tool_use 块本身仍保留在 message 里（_buildToolResultIndex 还要用），
+        // tool_call_card 会在渲染时识别 TodoWrite 并跳过卡片显示。
+        for (final block in msg.content) {
+          if (block is ToolUseBlock && block.name == 'TodoWrite') {
+            final next = parseTodos(block.input['todos']);
+            final changed = ref.read(todoListProvider.notifier).replace(next);
+            if (changed) {
+              ref.read(todoUpdatedAtProvider.notifier).state =
+                  DateTime.now().millisecondsSinceEpoch;
+            }
+          }
+        }
       } else if (msg is PongMsg || msg is SystemMsg) {
         // skip
       } else if (msg is CompactBoundaryMsg) {
@@ -572,7 +622,20 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   void _submit() {
     final text = _textController.text.trim();
-    if (text.isEmpty || !_connected || _busy) return;
+    if (text.isEmpty || !_connected) return;
+    _textController.clear();
+    // busy 时排队，否则直接发。result 到达 → _drainQueue 出队继续。
+    if (_busy) {
+      setState(() => _pending.add(text));
+      _scrollToEnd(force: true);
+      return;
+    }
+    _sendNow(text);
+  }
+
+  /// 实际把一条 user_message 发到 ws，并设置 busy / spinner 状态。
+  /// 已经假设 !_busy。调用者应自己处理排队。
+  void _sendNow(String text) {
     setState(() {
       _messages.add(LocalUserInput(text));
       _busy = true;
@@ -581,10 +644,22 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _currentBlockKind = null;
       _thoughtSeconds = null;
       _thoughtForTimer?.cancel();
-      _textController.clear();
     });
     _channel?.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
     _scrollToEnd(force: true);
+  }
+
+  /// busy 解除后调用：从队列头取一条发出。递归调用直至队列空或下一条 result。
+  void _drainQueue() {
+    if (_busy || !_connected || _pending.isEmpty) return;
+    final next = _pending.removeAt(0);
+    _sendNow(next);
+  }
+
+  /// 删除队列中某条 pending 消息（用户撤回未发出的输入）。
+  void _removePending(int index) {
+    if (index < 0 || index >= _pending.length) return;
+    setState(() => _pending.removeAt(index));
   }
 
   void _interrupt() {
@@ -644,10 +719,12 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           child: Stack(
             children: [
               _messages.isEmpty
-                  ? _EmptyState(
-                      icon: Icons.send_outlined,
-                      title: _connected ? s.chatStartTalking : s.chatConnecting,
-                    )
+                  ? (_loadingHistory
+                      ? const _ChatSkeleton()
+                      : _EmptyState(
+                          icon: Icons.send_outlined,
+                          title: _connected ? s.chatStartTalking : s.chatConnecting,
+                        ))
                   : ListView.builder(
                       controller: _scrollController,
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
@@ -697,6 +774,20 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             thoughtSeconds: _thoughtSeconds,
             color: t.accent,
             dimColor: t.textDim,
+            trailing: const TodoChip(),
+          )
+        else if (ref.watch(todoListProvider).isNotEmpty)
+          // 非 streaming 也要看到任务进度条 —— 单独占一行
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 12, 4),
+            child: Row(
+              children: const [Spacer(), TodoChip()],
+            ),
+          ),
+        if (_pending.isNotEmpty)
+          _PendingQueueBar(
+            messages: _pending,
+            onRemove: _removePending,
           ),
         Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
         if (!session.readOnly)
@@ -860,17 +951,21 @@ class _UserMessage extends ConsumerWidget {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: t.accent,
+                color: t.accentSubt,
                 borderRadius: const BorderRadius.only(
                   topLeft: Radius.circular(14),
                   topRight: Radius.circular(14),
                   bottomLeft: Radius.circular(14),
                   bottomRight: Radius.circular(4),
                 ),
+                border: Border.all(
+                  color: t.accent.withValues(alpha: 0.18),
+                  width: 0.5,
+                ),
               ),
               child: SelectableText(
                 text,
-                style: const TextStyle(fontSize: 14, color: Colors.white, height: 1.45),
+                style: TextStyle(fontSize: 14, color: t.text, height: 1.45),
               ),
             ),
           ),
@@ -1397,8 +1492,82 @@ class _PermissionModeRow extends StatelessWidget {
   }
 }
 
-/// 流式 assistant 消息：每个 delta 都用 MarkdownBody 实时渲染，
-/// 跟最终 AssistantMsg 的样式保持一致——代码块/列表/链接在打字过程中就成型。
+/// 流式 assistant 消息：每个 delta 都用 MarkdownBody 实时渲染。
+/// 用同样的 ⏺ gutter，跟最终 AssistantMsg 保持连续——流式收到的 token
+/// 看起来就像最终消息的同一条 block。
+/// 流式期间用户连发的消息在 composer 上方堆叠显示，每条带 × 撤回按钮。
+/// 复刻 claude-code 的 messageQueueManager：busy 时所有 user prompt 排队，
+/// 当前 turn 结束后 FIFO 出队继续发。
+class _PendingQueueBar extends ConsumerWidget {
+  final List<String> messages;
+  final void Function(int) onRemove;
+  const _PendingQueueBar({required this.messages, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = AppTokens.of(context);
+    return Container(
+      color: t.surface,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 6),
+            child: Row(
+              children: [
+                Icon(Icons.schedule, size: 12, color: t.textDim),
+                const SizedBox(width: 6),
+                Text(
+                  '排队中 · ${messages.length} 条',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: t.textDim,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          for (int i = 0; i < messages.length; i++)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: t.accent.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: t.accent.withValues(alpha: 0.18)),
+                ),
+                padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        messages[i],
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13, color: t.text, height: 1.3),
+                      ),
+                    ),
+                    InkResponse(
+                      onTap: () => onRemove(i),
+                      radius: 18,
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Icon(Icons.close, size: 14, color: t.textDim),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _StreamingMessage extends StatelessWidget {
   final StreamingAssistant buffer;
   const _StreamingMessage({required this.buffer});
@@ -1407,34 +1576,26 @@ class _StreamingMessage extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
-      child: Column(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(
-                'CLAUDE',
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.2,
-                  color: t.accent,
-                ),
+          SizedBox(
+            width: 18,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                '●',
+                style: TextStyle(fontSize: 11, color: t.text, height: 1.4),
               ),
-              const SizedBox(width: 8),
-              Container(
-                width: 4,
-                height: 4,
-                decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
-              ),
-            ],
+            ),
           ),
-          const SizedBox(height: 6),
-          MarkdownBody(
-            data: buffer.text.toString(),
-            selectable: true,
-            styleSheet: streamingMarkdownStyle(t),
+          Expanded(
+            child: MarkdownBody(
+              data: buffer.text.toString(),
+              selectable: true,
+              styleSheet: streamingMarkdownStyle(t),
+            ),
           ),
         ],
       ),
@@ -1466,6 +1627,158 @@ MarkdownStyleSheet streamingMarkdownStyle(AppTokens t) => MarkdownStyleSheet(
       h3: TextStyle(color: t.text, fontSize: 13, fontWeight: FontWeight.w600),
       listBullet: TextStyle(color: t.textMuted, fontSize: 13),
     );
+
+/// 历史会话首屏加载骨架屏：3 段不同长度的灰色占位 + 一组工具卡占位。
+/// 跟最终消息的 `●` gutter + bubble/卡片样式呼应，让加载完后视觉无突变。
+class _ChatSkeleton extends StatefulWidget {
+  const _ChatSkeleton();
+
+  @override
+  State<_ChatSkeleton> createState() => _ChatSkeletonState();
+}
+
+class _ChatSkeletonState extends State<_ChatSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, __) {
+        final color = Color.lerp(t.surfaceHi, t.surface, _ctrl.value)!;
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          children: [
+            // user bubble 占位（右侧）
+            _skelBubble(color, width: 180, isUser: true),
+            const SizedBox(height: 18),
+            // assistant ⏺ 几段
+            _skelAssistant(t, color, lines: const [.9, .65]),
+            const SizedBox(height: 14),
+            _skelToolCard(t, color),
+            const SizedBox(height: 14),
+            _skelAssistant(t, color, lines: const [.95, .7, .5]),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _skelBubble(Color c, {required double width, bool isUser = false}) {
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        width: width,
+        height: 36,
+        decoration: BoxDecoration(
+          color: c,
+          borderRadius: BorderRadius.circular(14),
+        ),
+      ),
+    );
+  }
+
+  Widget _skelLine(Color c, double widthFactor, {double height = 12}) {
+    return FractionallySizedBox(
+      alignment: Alignment.centerLeft,
+      widthFactor: widthFactor,
+      child: Container(
+        height: height,
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        decoration: BoxDecoration(
+          color: c,
+          borderRadius: BorderRadius.circular(4),
+        ),
+      ),
+    );
+  }
+
+  Widget _skelAssistant(AppTokens t, Color c, {required List<double> lines}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 18,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              width: 8, height: 8,
+              decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [for (final w in lines) _skelLine(c, w)],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _skelToolCard(AppTokens t, Color c) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 18,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Container(
+              width: 8, height: 8,
+              decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+            ),
+          ),
+        ),
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+            decoration: BoxDecoration(
+              color: t.surface,
+              border: Border(
+                top: BorderSide(color: c, width: 0.5),
+                right: BorderSide(color: c, width: 0.5),
+                bottom: BorderSide(color: c, width: 0.5),
+                left: BorderSide(color: c, width: 3),
+              ),
+              borderRadius: const BorderRadius.only(
+                topRight: Radius.circular(6),
+                bottomRight: Radius.circular(6),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(width: 14, height: 14, decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(3))),
+                const SizedBox(width: 8),
+                Container(width: 60, height: 10, decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(3))),
+                const SizedBox(width: 8),
+                Expanded(child: Container(height: 10, decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(3)))),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class _EmptyState extends StatelessWidget {
   final IconData icon;

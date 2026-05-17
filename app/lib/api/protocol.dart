@@ -44,6 +44,7 @@ abstract class IncomingMessage {
           sessionKey: json['session_key'] as String? ?? '',
           cwd: json['cwd'] as String? ?? '',
           permissionMode: json['permission_mode'] as String? ?? 'acceptEdits',
+          busy: json['busy'] as bool? ?? false,
         );
       case 'assistant':
         return AssistantMsg(
@@ -145,7 +146,15 @@ class SessionReady extends IncomingMessage {
   final String sessionKey;
   final String cwd;
   final String permissionMode;
-  SessionReady({required this.sessionKey, required this.cwd, required this.permissionMode});
+  /// 服务端 attach 已有 session 时为 true：当前有 in-flight 的流式响应，
+  /// 客户端应立即恢复 spinner / streaming UI，不必等下一个事件。
+  final bool busy;
+  SessionReady({
+    required this.sessionKey,
+    required this.cwd,
+    required this.permissionMode,
+    this.busy = false,
+  });
 }
 
 class AssistantMsg extends IncomingMessage {

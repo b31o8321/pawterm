@@ -72,6 +72,21 @@ class _CcSpinnerState extends State<CcSpinner>
 /// toolInput → 生成工具调用参数
 enum CcStreamMode { requesting, thinking, thoughtFor, responding, toolInput }
 
+/// 把秒数格式化成 `12s` / `1m30s` / `1h2m30s` 紧凑形式。
+/// - 总是从最高非零位开始；
+/// - 中间为 0 的单位省略：3630s → `1h30s`、3600s → `1h`、3660s → `1h1m`。
+String _formatElapsed(int seconds) {
+  if (seconds < 60) return '${seconds}s';
+  final h = seconds ~/ 3600;
+  final m = (seconds % 3600) ~/ 60;
+  final s = seconds % 60;
+  final parts = StringBuffer();
+  if (h > 0) parts.write('${h}h');
+  if (m > 0) parts.write('${m}m');
+  if (s > 0) parts.write('${s}s');
+  return parts.toString();
+}
+
 /// 一整行的"响应中"状态：spinner + 文案 + 经过秒数 + 停止按钮。
 /// 支持随 [mode] 动态切换文案，thinking → thoughtFor 至少持续 2s（防抖）。
 class CcSpinnerLine extends ConsumerStatefulWidget {
@@ -84,6 +99,8 @@ class CcSpinnerLine extends ConsumerStatefulWidget {
   final Color color;
   final Color dimColor;
   final VoidCallback? onStop;
+  /// 放在右侧（Spacer 之后、Stop 之前）的可选附加 widget，比如 TodoChip。
+  final Widget? trailing;
 
   const CcSpinnerLine({
     super.key,
@@ -93,6 +110,7 @@ class CcSpinnerLine extends ConsumerStatefulWidget {
     required this.color,
     required this.dimColor,
     this.onStop,
+    this.trailing,
   });
 
   @override
@@ -161,7 +179,7 @@ class _CcSpinnerLineState extends ConsumerState<CcSpinnerLine> {
           ),
           const SizedBox(width: 10),
           Text(
-            '${_elapsed}s',
+            _formatElapsed(_elapsed),
             style: TextStyle(
               fontSize: 11,
               color: widget.dimColor,
@@ -169,6 +187,10 @@ class _CcSpinnerLineState extends ConsumerState<CcSpinnerLine> {
             ),
           ),
           const Spacer(),
+          if (widget.trailing != null) ...[
+            widget.trailing!,
+            const SizedBox(width: 8),
+          ],
           if (widget.onStop != null)
             InkWell(
               onTap: widget.onStop,

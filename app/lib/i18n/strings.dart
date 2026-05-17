@@ -70,6 +70,12 @@ class Strings {
   final String filesDownload;
   final String filesDownloading;
   // Permission modes
+  final String todoChipTpl; // {done}/{total}
+  final String todoSheetTitle;
+  final String todoEmpty;
+  final String todoStatusPending;
+  final String todoStatusInProgress;
+  final String todoStatusCompleted;
   final String permModeTitle;
   final String permModeDefaultLabel;
   final String permModeDefaultDesc;
@@ -251,6 +257,12 @@ class Strings {
     required this.filesCancel,
     required this.filesDownload,
     required this.filesDownloading,
+    required this.todoChipTpl,
+    required this.todoSheetTitle,
+    required this.todoEmpty,
+    required this.todoStatusPending,
+    required this.todoStatusInProgress,
+    required this.todoStatusCompleted,
     required this.permModeTitle,
     required this.permModeDefaultLabel,
     required this.permModeDefaultDesc,
@@ -410,6 +422,12 @@ const Strings stringsEn = Strings(
   filesCancel: 'Cancel',
   filesDownload: 'Download',
   filesDownloading: 'Downloading',
+  todoChipTpl: 'Tasks {done}/{total}',
+  todoSheetTitle: 'Task list',
+  todoEmpty: 'No active tasks',
+  todoStatusPending: 'Pending',
+  todoStatusInProgress: 'In progress',
+  todoStatusCompleted: 'Completed',
   permModeTitle: 'Permission mode',
   permModeDefaultLabel: 'Ask each time',
   permModeDefaultDesc: 'Confirm every tool call',
@@ -573,6 +591,12 @@ const Strings stringsZh = Strings(
   filesCancel: '取消',
   filesDownload: '下载',
   filesDownloading: '下载中',
+  todoChipTpl: '任务 {done}/{total}',
+  todoSheetTitle: '任务列表',
+  todoEmpty: '暂无任务',
+  todoStatusPending: '待处理',
+  todoStatusInProgress: '进行中',
+  todoStatusCompleted: '已完成',
   permModeTitle: '权限模式',
   permModeDefaultLabel: '每次询问',
   permModeDefaultDesc: '每次工具调用都确认',

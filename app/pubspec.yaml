@@ -1,7 +1,7 @@
 name: claude_companion
 description: Mobile client to control Claude Code via the Claude Companion server.
 publish_to: 'none'
-version: 0.1.1+1
+version: 0.1.2+1
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

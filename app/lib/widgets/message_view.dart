@@ -1,11 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/protocol.dart';
-import '../i18n/locale_provider.dart';
 import '../theme.dart';
-import '../utils/time_format.dart';
 import 'tool_call_card.dart';
 
 class MessageView extends StatelessWidget {
@@ -22,18 +19,16 @@ class MessageView extends StatelessWidget {
     final msg = message;
 
     if (msg is AssistantMsg) {
-      // 过滤掉不渲染的块（目前是 thinking）。如果过滤后没有任何可视块，
-      // 整条消息就不渲染——避免出现一个孤零零的 "CLAUDE" 头加空白。
+      // 复刻 claude-code 终端样式：不再有 "CLAUDE" 大写头；每个可视 block
+      // 用 ⏺ gutter 标记，整轮多条 assistant message 视觉上自然连成一片。
       final visible = msg.content.where((b) => b is! ThinkingBlock).toList();
       if (visible.isEmpty) return const SizedBox.shrink();
       return Padding(
-        padding: const EdgeInsets.only(bottom: 20),
+        padding: const EdgeInsets.only(bottom: 12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _Header(label: 'CLAUDE', color: t.accent, timestamp: msg.timestamp),
-            const SizedBox(height: 6),
-            ...visible.map((b) => _renderBlock(context, b)),
+            for (final b in visible) _gutterRow(context, _renderBlock(context, b)),
           ],
         ),
       );
@@ -92,13 +87,45 @@ class MessageView extends StatelessWidget {
     return const SizedBox.shrink();
   }
 
+  /// 复刻 claude-code 终端的 BLACK_CIRCLE gutter。
+  /// 用 U+25CF `●`（Geometric Shapes，纯文本字符）而非 U+23FA `⏺`（emoji
+  /// presentation，Android/iOS 会渲染成橙底方块）。
+  Widget _gutterRow(BuildContext context, Widget content) {
+    if (content is SizedBox && content.height == 0 && content.width == 0) {
+      return content;
+    }
+    final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 18,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                '●',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: t.text,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ),
+          Expanded(child: content),
+        ],
+      ),
+    );
+  }
+
   Widget _renderBlock(BuildContext context, ContentBlock block) {
     final t = AppTokens.of(context);
 
     if (block is TextBlock) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: MarkdownBody(
+      // 外层 _gutterRow 已经管 bottom 间距，这里不再叠加
+      return MarkdownBody(
           data: block.text,
           selectable: true,
           styleSheet: MarkdownStyleSheet(
@@ -124,8 +151,7 @@ class MessageView extends StatelessWidget {
             h3: TextStyle(color: t.text, fontSize: 13, fontWeight: FontWeight.w600),
             listBullet: TextStyle(color: t.textMuted, fontSize: 13),
           ),
-        ),
-      );
+        );
     }
 
     if (block is ThinkingBlock) {
@@ -183,6 +209,19 @@ Widget? _tryParseCommandChip(String text) {
   }
   // 3) 系统提示（隐藏；这些是注入给模型的，不该出现在主流里）
   if (trimmed.startsWith('<system-reminder>')) {
+    return const SizedBox.shrink();
+  }
+  // 4) compact / resume 时 SDK 注入的"上下文摘要" — 不是用户输入，
+  //    渲染成可折叠的 system chip 而非用户气泡。
+  if (trimmed.startsWith('This session is being continued from a previous conversation')) {
+    return _SystemNoteChip(
+      icon: Icons.history_outlined,
+      label: '上下文摘要',
+      detail: trimmed,
+    );
+  }
+  // 5) 本地命令注入的免责声明（"Caveat: The messages below were generated..."）
+  if (trimmed.startsWith('<local-command-caveat>')) {
     return const SizedBox.shrink();
   }
   return null;
@@ -310,6 +349,93 @@ class _CommandOutputChip extends StatelessWidget {
   }
 }
 
+/// 系统注入的元信息块（如 resume 时的 compact summary）。默认折叠成一行 chip，
+/// 点击展开看完整内容 —— 既不当用户气泡，又不完全隐藏。
+class _SystemNoteChip extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final String detail;
+  const _SystemNoteChip({required this.icon, required this.label, required this.detail});
+
+  @override
+  State<_SystemNoteChip> createState() => _SystemNoteChipState();
+}
+
+class _SystemNoteChipState extends State<_SystemNoteChip> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Align(
+        alignment: Alignment.center,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Container(
+            decoration: BoxDecoration(
+              color: t.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: t.border, width: 0.5),
+            ),
+            clipBehavior: Clip.hardEdge,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                InkWell(
+                  onTap: () => setState(() => _open = !_open),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(widget.icon, size: 13, color: t.textDim),
+                        const SizedBox(width: 6),
+                        Text(
+                          widget.label,
+                          style: TextStyle(fontSize: 12, color: t.textMuted, fontWeight: FontWeight.w500),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          _open ? Icons.expand_less : Icons.expand_more,
+                          size: 14,
+                          color: t.textDim,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (_open)
+                  Container(
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: t.bg,
+                      border: Border(top: BorderSide(color: t.borderSubt, width: 0.5)),
+                    ),
+                    padding: const EdgeInsets.all(10),
+                    child: SelectableText(
+                      widget.detail.length > 8000
+                          ? '${widget.detail.substring(0, 8000)}\n…(truncated)'
+                          : widget.detail,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: t.textMuted,
+                        fontFamily: 'monospace',
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 用户消息气泡（用于 UserMsg 历史 text 块）。与 chat_tab 里的 _UserMessage
 /// 同样视觉规格：右对齐、绿色气泡、最大宽度 78%。
 class _UserBubble extends StatelessWidget {
@@ -329,59 +455,29 @@ class _UserBubble extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: t.accent,
+              color: t.accentSubt,
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(14),
                 topRight: Radius.circular(14),
                 bottomLeft: Radius.circular(14),
                 bottomRight: Radius.circular(4),
               ),
+              border: Border.all(
+                color: t.accent.withValues(alpha: 0.18),
+                width: 0.5,
+              ),
             ),
             child: SelectableText(
               text,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 14,
-                color: Colors.white,
+                color: t.text,
                 height: 1.45,
               ),
             ),
           ),
         ),
       ),
-    );
-  }
-}
-
-class _Header extends ConsumerWidget {
-  final String label;
-  final Color color;
-  final int? timestamp;
-  const _Header({required this.label, required this.color, this.timestamp});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = AppTokens.of(context);
-    final s = ref.watch(stringsProvider);
-    final ts = tsFromMillis(timestamp);
-    return Row(
-      children: [
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 1.2,
-            color: color,
-          ),
-        ),
-        if (ts != null) ...[
-          const SizedBox(width: 8),
-          Text(
-            formatMessageTime(ts, yesterdayLabel: s.timeYesterday),
-            style: TextStyle(fontFamily: 'monospace', fontSize: 10, color: t.textDim),
-          ),
-        ],
-      ],
     );
   }
 }

@@ -31,6 +31,9 @@ class _ToolCallCardState extends State<ToolCallCard> {
 
   @override
   Widget build(BuildContext context) {
+    // TodoWrite 工具调用：交给顶部全局 TodoChip 展示，消息流里不显示卡片。
+    if (toolUse.name == 'TodoWrite') return const SizedBox.shrink();
+
     final t = AppTokens.of(context);
     final color = _colorFor(t, toolUse.name);
     final icon = _iconFor(toolUse.name);

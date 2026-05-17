@@ -184,5 +184,12 @@ ThemeData buildTheme(Brightness brightness) {
     ),
     splashColor: t.accent.withValues(alpha: 0.06),
     highlightColor: t.accent.withValues(alpha: 0.04),
+    textSelectionTheme: TextSelectionThemeData(
+      // 选区色用 50% accent：与 14%/10% 气泡底色拉开 36~40 个 alpha 等级，
+      // 长按选中时"选了 vs 没选"差异明显，不会糊成一片绿。
+      selectionColor: t.accent.withValues(alpha: 0.50),
+      cursorColor: t.accent,
+      selectionHandleColor: t.accent,
+    ),
   );
 }

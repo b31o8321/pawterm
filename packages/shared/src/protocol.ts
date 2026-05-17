@@ -25,7 +25,7 @@ export const KNOWN_MODELS = [
 ] as const;
 
 export type ChatServerMessage =
-  | { type: 'session_ready'; session_key: string; cwd: string; permission_mode: PermissionMode; resumed?: string | null }
+  | { type: 'session_ready'; session_key: string; cwd: string; permission_mode: PermissionMode; resumed?: string | null; busy?: boolean }
   | { type: 'assistant'; model?: string; content: ContentBlock[]; timestamp?: number }
   | { type: 'user'; content: ContentBlock[]; timestamp?: number }
   | { type: 'system'; subtype?: string; data?: unknown; timestamp?: number }

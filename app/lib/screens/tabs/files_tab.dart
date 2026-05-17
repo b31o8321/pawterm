@@ -29,6 +29,10 @@ class _FilesTabState extends ConsumerState<FilesTab> {
   bool _loading = false;
   String? _error;
 
+  /// 进程内目录缓存：path → 上次 ls 的结果。
+  /// 进入已访问的目录优先用缓存秒开，同时后台异步刷新；用户下拉/点刷新强制 bypass。
+  final Map<String, FsListing> _cache = {};
+
   String _sessionKey(CurrentSession s) => s.cwd;
 
   void _initIfNeeded(CurrentSession session) {
@@ -38,17 +42,35 @@ class _FilesTabState extends ConsumerState<FilesTab> {
     _ls(session.cwd);
   }
 
-  Future<void> _ls(String path) async {
+  /// 进入目录。
+  /// - [force] = false：优先用 cache 秒开，并后台 refresh
+  /// - [force] = true：bypass cache，强制重新拉取（下拉刷新 / 显式点刷新）
+  Future<void> _ls(String path, {bool force = false}) async {
     final conn = ref.read(activeConnectionProvider);
     if (conn == null) return;
+
+    // 走缓存：立即把 cached entries 显示出来，loading 仅在 cache miss 才置 true
+    final cached = !force ? _cache[path] : null;
     setState(() {
-      _loading = true;
+      if (cached != null) {
+        _path = cached.path;
+        _entries = cached.entries;
+        _loading = false;
+      } else {
+        _path = path;
+        _entries = const [];
+        _loading = true;
+      }
       _error = null;
     });
+
     try {
       final api = FilesApi(conn.httpBase);
       final listing = await api.ls(path);
       if (!mounted) return;
+      _cache[listing.path] = listing;
+      // 如果用户已经跳到别的目录，不要回填覆盖
+      if (_path != listing.path && _path != path) return;
       setState(() {
         _path = listing.path;
         _entries = listing.entries;
@@ -56,25 +78,14 @@ class _FilesTabState extends ConsumerState<FilesTab> {
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = e.toString();
-      });
+      // cache hit 的情况下网络失败不显示错误（保留旧内容），cache miss 才报错
+      if (cached == null) {
+        setState(() {
+          _loading = false;
+          _error = e.toString();
+        });
+      }
     }
-  }
-
-  void _goUp() {
-    if (_path == null) return;
-    final idx = _path!.lastIndexOf('/');
-    if (idx <= 0) return;
-    final parent = _path!.substring(0, idx);
-    _ls(parent);
-  }
-
-  bool get _canGoUp {
-    if (_path == null || _rootPath == null) return false;
-    if (_path == _rootPath) return false;
-    return _path!.contains('/');
   }
 
   String _humanPath(String path) {
@@ -180,10 +191,10 @@ class _FilesTabState extends ConsumerState<FilesTab> {
       children: [
         _PathBar(
           path: _path == null ? '~' : _humanPath(_path!),
-          canGoUp: _canGoUp,
-          onGoUp: _goUp,
-          onRefresh: _path == null ? null : () => _ls(_path!),
-          upLabel: s.filesUp,
+          rawPath: _path,
+          rootPath: _rootPath,
+          onJump: (abs) => _ls(abs),
+          onRefresh: _path == null ? null : () => _ls(_path!, force: true),
         ),
         Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
         Expanded(child: _body(t, s)),
@@ -219,72 +230,116 @@ class _FilesTabState extends ConsumerState<FilesTab> {
         child: Text(s.filesEmpty, style: TextStyle(color: t.textDim, fontSize: 13)),
       );
     }
-    return ListView.builder(
-      padding: EdgeInsets.zero,
-      itemCount: _entries.length,
-      itemBuilder: (_, i) {
-        final e = _entries[i];
-        return _FsRow(
-          entry: e,
-          onTap: () => e.isDir ? _ls(e.path) : _onTapFile(e),
-        );
+    return RefreshIndicator(
+      onRefresh: () async {
+        if (_path != null) await _ls(_path!, force: true);
       },
+      child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: EdgeInsets.zero,
+        itemCount: _entries.length,
+        itemBuilder: (_, i) {
+          final e = _entries[i];
+          return _FsRow(
+            entry: e,
+            onTap: () => e.isDir ? _ls(e.path) : _onTapFile(e),
+          );
+        },
+      ),
     );
   }
 }
 
-// ── path bar ────────────────────────────────────────────────────────
+// ── path bar (breadcrumb) ──────────────────────────────────────────
 
+/// 可点击的路径面包屑：`~ / workspace / shulex / claude-companion`，
+/// 每段都能 tap 跳到对应那一级。比单纯的"上级"按钮更高效——尤其深路径下。
 class _PathBar extends StatelessWidget {
-  final String path;
-  final bool canGoUp;
-  final VoidCallback? onGoUp;
+  final String path; // 已经 home-fold 过的展示路径
+  final String? rawPath; // 真实绝对路径，用于点击时算出每段的目标 path
+  final String? rootPath; // 起始项目根，root 之前的段不允许 jump
+  final void Function(String absolutePath) onJump;
   final VoidCallback? onRefresh;
-  final String upLabel;
   const _PathBar({
     required this.path,
-    required this.canGoUp,
-    required this.onGoUp,
+    required this.rawPath,
+    required this.rootPath,
+    required this.onJump,
     required this.onRefresh,
-    required this.upLabel,
   });
+
+  /// 把 `~/workspace/shulex/.../server` 拆成可点击段。每段返回 (label, absolutePath?)。
+  /// absolutePath == null 表示该段在 root 之外，禁止跳转。
+  List<(String, String?)> _segments() {
+    if (rawPath == null || rawPath!.isEmpty) {
+      return [('~', null)];
+    }
+    final raw = rawPath!;
+    final segs = raw.split('/').where((s) => s.isNotEmpty).toList();
+    // 重建每段对应的累积路径
+    final result = <(String, String?)>[];
+    var cum = '';
+    final isHome = path.startsWith('~');
+    if (isHome) {
+      // 找到 home 段：raw 形如 /Users/<me>/...；前两段 (Users/<me>) 折叠成 ~
+      // 累积 path 跨过 /Users/<me> 为止
+      if (segs.length >= 2) {
+        cum = '/${segs[0]}/${segs[1]}';
+        result.add(('~', _isUnderRoot(cum) ? cum : null));
+        for (var i = 2; i < segs.length; i++) {
+          cum = '$cum/${segs[i]}';
+          result.add((segs[i], _isUnderRoot(cum) ? cum : null));
+        }
+      } else {
+        result.add(('~', null));
+      }
+    } else {
+      // 绝对路径但不在 home 下：完整展开（首段保留 / 前缀）
+      result.add(('/', null));
+      for (final s in segs) {
+        cum = '$cum/$s';
+        result.add((s, _isUnderRoot(cum) ? cum : null));
+      }
+    }
+    return result;
+  }
+
+  bool _isUnderRoot(String abs) {
+    if (rootPath == null) return true;
+    return abs == rootPath || abs.startsWith('$rootPath/') || rootPath!.startsWith('$abs/') || rootPath == abs;
+  }
 
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final segs = _segments();
     return Container(
       color: t.surface,
-      padding: const EdgeInsets.fromLTRB(8, 6, 4, 6),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
-          if (canGoUp)
-            InkWell(
-              onTap: onGoUp,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.arrow_back_ios_new, size: 13, color: t.accent),
-                    const SizedBox(width: 2),
-                    Text(upLabel,
-                        style: TextStyle(fontSize: 13, color: t.accent, fontWeight: FontWeight.w500)),
-                  ],
-                ),
-              ),
-            )
-          else
-            const SizedBox(width: 8),
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6),
-              child: Text(
-                path,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 11.5, color: t.textMuted, fontFamily: 'monospace'),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true, // 末段总是可见
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (int i = 0; i < segs.length; i++) ...[
+                    _Crumb(
+                      label: segs[i].$1,
+                      target: segs[i].$2,
+                      isLast: i == segs.length - 1,
+                      onJump: onJump,
+                    ),
+                    if (i < segs.length - 1)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Icon(Icons.chevron_right, size: 14, color: t.textDim),
+                      ),
+                  ],
+                ],
               ),
             ),
           ),
@@ -295,6 +350,43 @@ class _PathBar extends StatelessWidget {
             onPressed: onRefresh,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _Crumb extends StatelessWidget {
+  final String label;
+  final String? target; // null = 不可跳
+  final bool isLast;
+  final void Function(String) onJump;
+  const _Crumb({
+    required this.label,
+    required this.target,
+    required this.isLast,
+    required this.onJump,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final color = isLast ? t.text : (target == null ? t.textDim : t.accent);
+    final weight = isLast ? FontWeight.w600 : FontWeight.w500;
+    final tappable = !isLast && target != null;
+    return InkWell(
+      onTap: tappable ? () => onJump(target!) : null,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: color,
+            fontWeight: weight,
+            fontFamily: 'monospace',
+          ),
+        ),
       ),
     );
   }
