@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../api/protocol.dart';
 import '../theme.dart';
@@ -411,41 +412,110 @@ class _OptionTile extends StatelessWidget {
     );
   }
 
-  void _showPreview(BuildContext context, String label, String preview) {
+  void _showPreview(BuildContext context, String optionLabel, String preview) {
     final t = AppTokens.of(context);
+    // Rudimentary HTML detection: if we see <tag> patterns, fall back to plain text.
+    final looksHtml = RegExp(r'<\s*\w+[^>]*>').hasMatch(preview);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: t.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              label,
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: t.text),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.9,
+          minChildSize: 0.5,
+          maxChildSize: 0.95,
+          expand: false,
+          builder: (ctx2, scroll) {
+            return Container(
               decoration: BoxDecoration(
-                color: t.bg,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: t.borderSubt, width: 0.5),
+                color: t.surface,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
               ),
-              child: SelectableText(
-                preview,
-                style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: t.textMuted, height: 1.5),
+              child: Column(
+                children: [
+                  // drag handle
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: t.border,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  // title row
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 4, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            optionLabel,
+                            style: TextStyle(
+                              color: t.text,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.close_rounded, color: t.textMuted),
+                          onPressed: () => Navigator.of(ctx2).pop(),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Divider(color: t.borderSubt, height: 1, thickness: 0.5),
+                  // body
+                  Expanded(
+                    child: SingleChildScrollView(
+                      controller: scroll,
+                      padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+                      child: looksHtml
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(8),
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  decoration: BoxDecoration(
+                                    color: t.warning.withValues(alpha: 0.1),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: t.warning.withValues(alpha: 0.3),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    'Preview 含 HTML，显示原文：',
+                                    style: TextStyle(fontSize: 11, color: t.warning),
+                                  ),
+                                ),
+                                SelectableText(
+                                  preview,
+                                  style: TextStyle(
+                                    fontFamily: 'monospace',
+                                    fontSize: 12,
+                                    color: t.textMuted,
+                                    height: 1.5,
+                                  ),
+                                ),
+                              ],
+                            )
+                          : MarkdownBody(
+                              data: preview,
+                              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(ctx2)),
+                            ),
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
   }
 }
