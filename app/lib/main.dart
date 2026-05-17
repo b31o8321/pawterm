@@ -25,6 +25,11 @@ class CcApp extends ConsumerWidget {
       theme: buildTheme(Brightness.light),
       darkTheme: buildTheme(Brightness.dark),
       themeMode: themeMode,
+      // 让 Material 内部的 ColorTween 立即结束，所有组件在同一帧翻牌。
+      // 不然 Material 的 Theme.of 在做 200ms 渐变、AppTokens.of 已经在中点突变，
+      // 视觉上就是"有的组件先变，有的后变"。
+      themeAnimationDuration: Duration.zero,
+      themeAnimationCurve: Curves.linear,
       locale: locale,
       supportedLocales: const [Locale('en'), Locale('zh')],
       localizationsDelegates: const [

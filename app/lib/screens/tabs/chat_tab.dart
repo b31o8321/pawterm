@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -26,6 +27,13 @@ class LocalUserInput extends IncomingMessage {
 class StreamingAssistant extends IncomingMessage {
   final StringBuffer text = StringBuffer();
   bool stopped = false;
+}
+
+class _HistoryPage {
+  final List<IncomingMessage> messages;
+  final String? oldestUuid;
+  final bool hasMore;
+  const _HistoryPage({required this.messages, this.oldestUuid, required this.hasMore});
 }
 
 class ChatTab extends ConsumerStatefulWidget {
@@ -53,10 +61,39 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   int? _thoughtSeconds;
   Timer? _thoughtForTimer;
 
+  // 跟随末尾滚动：默认开启。当用户手动向上划离开底部 → 关闭，并在右下角显示
+  // 浮动按钮；用户按按钮或自己滑回底部 → 重新开启。
+  bool _stickToBottom = true;
+  static const double _stickToBottomThreshold = 80.0;
+
+  // 历史消息反向分页（首屏 50 条，滚到顶取上一页）。
+  static const int _historyPageSize = 50;
+  static const double _loadMoreThreshold = 200.0;
+  String? _oldestUuid;
+  bool _hasMoreHistory = false;
+  bool _loadingOlder = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final atBottom = pos.maxScrollExtent - pos.pixels <= _stickToBottomThreshold;
+    if (atBottom != _stickToBottom) {
+      setState(() => _stickToBottom = atBottom);
+    }
+    // 滚到接近顶部 → 拉更早一页
+    if (pos.pixels <= _loadMoreThreshold &&
+        _hasMoreHistory &&
+        !_loadingOlder &&
+        _oldestUuid != null) {
+      _loadOlderPage();
+    }
   }
 
   @override
@@ -65,6 +102,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     _thoughtForTimer?.cancel();
     _channel?.sink.close();
     _textController.dispose();
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
@@ -105,6 +143,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _busy = false;
       _error = null;
       _boundKey = key;
+      _oldestUuid = null;
+      _hasMoreHistory = false;
+      _loadingOlder = false;
     });
 
     final config = ref.read(activeConnectionProvider);
@@ -146,35 +187,107 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     }
   }
 
+  /// 首屏加载：最后 [_historyPageSize] 条消息。
   Future<void> _loadHistory(String httpBase, String cwd, String sessionId) async {
     try {
-      final uri = Uri.parse('$httpBase/sessions/$sessionId/messages').replace(
-        queryParameters: {'cwd': cwd, 'limit': '200'},
+      final page = await _fetchHistoryPage(
+        httpBase, cwd, sessionId,
+        limit: _historyPageSize,
       );
-      final resp = await http.get(uri).timeout(const Duration(seconds: 10));
-      if (resp.statusCode != 200) return;
-      final data = jsonDecode(resp.body) as Map<String, dynamic>;
-      final raw = (data['messages'] as List?) ?? const [];
-      final loaded = <IncomingMessage>[];
-      for (final item in raw) {
-        final inner = (item as Map<String, dynamic>)['message'];
-        if (inner is Map<String, dynamic>) {
-          final m = IncomingMessage.fromJson(inner);
-          // Keep assistant / user / result so historical turns also show duration + cost.
-          if (m is AssistantMsg || m is UserMsg || m is ResultMsg) loaded.add(m);
-        }
-      }
-      if (!mounted) return;
+      if (page == null || !mounted) return;
       setState(() {
-        // Prepend so live messages come after history.
         _messages
           ..clear()
-          ..addAll(loaded);
+          ..addAll(page.messages);
+        _oldestUuid = page.oldestUuid;
+        _hasMoreHistory = page.hasMore;
       });
-      _scrollToEnd();
+      _scrollToEnd(force: true);
     } catch (_) {
       // History fetch failure is non-fatal — just skip.
     }
+  }
+
+  /// 上滑到顶时调用：取 [_oldestUuid] 前面的一页，prepend 到列表前。
+  /// prepend 后用 maxScrollExtent 差值保持视口位置（避免视觉跳动）。
+  Future<void> _loadOlderPage() async {
+    if (_loadingOlder || !_hasMoreHistory || _oldestUuid == null) return;
+    final conn = ref.read(activeConnectionProvider);
+    final session = ref.read(currentSessionProvider);
+    if (conn == null || session?.resumeId == null) return;
+
+    setState(() => _loadingOlder = true);
+    final preMax = _scrollController.hasClients
+        ? _scrollController.position.maxScrollExtent
+        : 0.0;
+    final preOffset = _scrollController.hasClients
+        ? _scrollController.offset
+        : 0.0;
+
+    try {
+      final page = await _fetchHistoryPage(
+        conn.httpBase, session!.cwd, session.resumeId!,
+        limit: _historyPageSize,
+        beforeUuid: _oldestUuid,
+      );
+      if (page == null || !mounted) {
+        setState(() => _loadingOlder = false);
+        return;
+      }
+      setState(() {
+        _messages.insertAll(0, page.messages);
+        _oldestUuid = page.oldestUuid ?? _oldestUuid;
+        _hasMoreHistory = page.hasMore;
+        _loadingOlder = false;
+      });
+      // 等下一帧 layout 完，根据高度增量保持视口
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        final postMax = _scrollController.position.maxScrollExtent;
+        final delta = postMax - preMax;
+        if (delta > 0) {
+          _scrollController.jumpTo(preOffset + delta);
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loadingOlder = false);
+    }
+  }
+
+  Future<_HistoryPage?> _fetchHistoryPage(
+    String httpBase,
+    String cwd,
+    String sessionId, {
+    required int limit,
+    String? beforeUuid,
+  }) async {
+    final uri = Uri.parse('$httpBase/sessions/$sessionId/messages').replace(
+      queryParameters: {
+        'cwd': cwd,
+        'limit': '$limit',
+        if (beforeUuid != null) 'before_uuid': beforeUuid,
+      },
+    );
+    final resp = await http.get(uri).timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200) return null;
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final raw = (data['messages'] as List?) ?? const [];
+    final loaded = <IncomingMessage>[];
+    String? oldestUuid;
+    for (final item in raw) {
+      final env = item as Map<String, dynamic>;
+      oldestUuid ??= env['uuid'] as String?;
+      final inner = env['message'];
+      if (inner is Map<String, dynamic>) {
+        final m = IncomingMessage.fromJson(inner);
+        if (m is AssistantMsg || m is UserMsg || m is ResultMsg) loaded.add(m);
+      }
+    }
+    return _HistoryPage(
+      messages: loaded,
+      oldestUuid: oldestUuid,
+      hasMore: (data['has_more'] as bool?) ?? false,
+    );
   }
 
   void _manualReconnect() {
@@ -294,7 +407,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     });
   }
 
-  void _scrollToEnd() {
+  /// 滚动到底部。
+  /// - [force] = true：无论 _stickToBottom 是什么都强制滚（用于浮动按钮 / 提交消息后）
+  /// - [force] = false（默认）：仅在当前已经"贴底"时滚（用于流式 delta 自动跟随）
+  void _scrollToEnd({bool force = false}) {
+    if (!force && !_stickToBottom) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
       _scrollController.animateTo(
@@ -302,6 +419,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         duration: const Duration(milliseconds: 150),
         curve: Curves.easeOut,
       );
+      if (force) setState(() => _stickToBottom = true);
     });
   }
 
@@ -319,7 +437,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _textController.clear();
     });
     _channel?.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
-    _scrollToEnd();
+    _scrollToEnd(force: true);
   }
 
   void _interrupt() {
@@ -344,34 +462,77 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       if (mounted) _ensureConnected(session);
     });
 
+    // 扫一遍消息流，按 tool_use_id 索引所有 ToolResultBlock。
+    // 这样渲染 ToolUseBlock 时能找到匹配 result 一起折叠显示（参考 cxClaw 的 upsertToolMessage）。
+    final toolResults = <String, ToolResultBlock>{};
+    for (final m in _messages) {
+      if (m is UserMsg) {
+        for (final b in m.content) {
+          if (b is ToolResultBlock && b.toolUseId.isNotEmpty) {
+            toolResults[b.toolUseId] = b;
+          }
+        }
+      }
+    }
+
     return Column(
       children: [
         _StatusRow(
           connected: _connected,
           busy: _busy,
           error: _error,
-          onStop: _interrupt,
           onReconnect: _manualReconnect,
         ),
         Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
         Expanded(
-          child: _messages.isEmpty
-              ? _EmptyState(
-                  icon: Icons.send_outlined,
-                  title: _connected ? s.chatStartTalking : s.chatConnecting,
-                  subtitle: _connected ? null : null,
-                )
-              : ListView.builder(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                  itemCount: _messages.length,
-                  itemBuilder: (_, i) {
-                    final m = _messages[i];
-                    if (m is LocalUserInput) return _UserMessage(text: m.text, timestamp: m.timestamp);
-                    if (m is StreamingAssistant) return _StreamingMessage(buffer: m);
-                    return MessageView(message: m);
-                  },
+          child: Stack(
+            children: [
+              _messages.isEmpty
+                  ? _EmptyState(
+                      icon: Icons.send_outlined,
+                      title: _connected ? s.chatStartTalking : s.chatConnecting,
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                      // +1 用于在顶部插入"加载更早消息"指示
+                      itemCount: _messages.length + 1,
+                      itemBuilder: (_, i) {
+                        if (i == 0) {
+                          if (_loadingOlder) {
+                            return const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 14),
+                              child: Center(
+                                child: SizedBox(
+                                  width: 16, height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                                ),
+                              ),
+                            );
+                          }
+                          // 没在加载也要占位（哪怕高度 0），保证 itemCount 一致
+                          return const SizedBox.shrink();
+                        }
+                        final m = _messages[i - 1];
+                        if (m is LocalUserInput) {
+                          return _UserMessage(text: m.text, timestamp: m.timestamp);
+                        }
+                        if (m is StreamingAssistant) return _StreamingMessage(buffer: m);
+                        return MessageView(message: m, toolResults: toolResults);
+                      },
+                    ),
+              // Right-bottom "jump to bottom" button — only shown when the user
+              // scrolled away from the latest message.
+              if (!_stickToBottom)
+                Positioned(
+                  right: 12,
+                  bottom: 12,
+                  child: _JumpToBottomButton(
+                    onTap: () => _scrollToEnd(force: true),
+                  ),
                 ),
+            ],
+          ),
         ),
         if (_busy && _busyStartedAt != null)
           CcSpinnerLine(
@@ -380,16 +541,41 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             thoughtSeconds: _thoughtSeconds,
             color: t.accent,
             dimColor: t.textDim,
-            onStop: _interrupt,
           ),
         Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
         _Composer(
           controller: _textController,
-          enabled: _connected && !_busy,
+          connected: _connected,
+          busy: _busy,
           onSubmit: _submit,
+          onStop: _interrupt,
           onSwitchModel: _switchModel,
         ),
       ],
+    );
+  }
+}
+
+class _JumpToBottomButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _JumpToBottomButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Material(
+      elevation: 3,
+      shadowColor: Colors.black.withValues(alpha: 0.18),
+      color: t.surface,
+      shape: CircleBorder(side: BorderSide(color: t.border, width: 0.5)),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: SizedBox(
+          width: 40, height: 40,
+          child: Icon(Icons.arrow_downward_rounded, size: 18, color: t.text),
+        ),
+      ),
     );
   }
 }
@@ -398,13 +584,11 @@ class _StatusRow extends StatelessWidget {
   final bool connected;
   final bool busy;
   final String? error;
-  final VoidCallback onStop;
   final VoidCallback onReconnect;
   const _StatusRow({
     required this.connected,
     required this.busy,
     required this.error,
-    required this.onStop,
     required this.onReconnect,
   });
 
@@ -424,37 +608,13 @@ class _StatusRow extends StatelessWidget {
       child: Row(
         children: [
           Container(
-            width: 6,
-            height: 6,
+            width: 6, height: 6,
             decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
           ),
           const SizedBox(width: 8),
           Text(statusText, style: TextStyle(fontSize: 11, color: t.textMuted)),
-          const SizedBox(width: 8),
-          Text('·', style: TextStyle(color: t.textDim, fontSize: 11)),
-          const SizedBox(width: 8),
-          Text(
-            'sonnet-4.6',
-            style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: t.textMuted),
-          ),
           const Spacer(),
-          if (busy)
-            InkWell(
-              onTap: onStop,
-              borderRadius: BorderRadius.circular(4),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                child: Row(
-                  children: [
-                    Icon(Icons.stop_circle_outlined, size: 14, color: t.error),
-                    const SizedBox(width: 4),
-                    Text('stop',
-                        style: TextStyle(fontSize: 11, color: t.error, fontWeight: FontWeight.w500)),
-                  ],
-                ),
-              ),
-            )
-          else if (error != null || !connected)
+          if (error != null || (!connected && !busy))
             InkWell(
               onTap: onReconnect,
               borderRadius: BorderRadius.circular(4),
@@ -464,8 +624,10 @@ class _StatusRow extends StatelessWidget {
                   children: [
                     Icon(Icons.refresh, size: 14, color: t.accent),
                     const SizedBox(width: 4),
-                    Text('reconnect',
-                        style: TextStyle(fontSize: 11, color: t.accent, fontWeight: FontWeight.w500)),
+                    Text(
+                      'reconnect',
+                      style: TextStyle(fontSize: 11, color: t.accent, fontWeight: FontWeight.w500),
+                    ),
                   ],
                 ),
               ),
@@ -527,13 +689,17 @@ class _UserMessage extends ConsumerWidget {
 
 class _Composer extends ConsumerWidget {
   final TextEditingController controller;
-  final bool enabled;
+  final bool connected;
+  final bool busy;
   final VoidCallback onSubmit;
+  final VoidCallback onStop;
   final void Function(ModelOption) onSwitchModel;
   const _Composer({
     required this.controller,
-    required this.enabled,
+    required this.connected,
+    required this.busy,
     required this.onSubmit,
+    required this.onStop,
     required this.onSwitchModel,
   });
 
@@ -541,6 +707,8 @@ class _Composer extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = AppTokens.of(context);
     final model = ref.watch(currentModelProvider);
+    final canSend = connected && !busy;
+    final editable = connected; // 文本框 busy 时仍可编辑（用户能预写下一条），但发送被 stop 按钮替代。
     return SafeArea(
       top: false,
       child: Padding(
@@ -551,56 +719,111 @@ class _Composer extends ConsumerWidget {
             borderRadius: BorderRadius.circular(14),
             border: Border.all(color: t.border, width: 0.5),
           ),
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 6),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
-                child: TextField(
-                  controller: controller,
-                  minLines: 1,
-                  maxLines: 6,
-                  enabled: enabled,
-                  cursorColor: t.accent,
-                  style: TextStyle(fontSize: 14, color: t.text, height: 1.4),
-                  decoration: InputDecoration(
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    disabledBorder: InputBorder.none,
-                    isDense: true,
-                    filled: false,
-                    contentPadding: EdgeInsets.zero,
-                    hintText: enabled ? 'Ask Claude…' : 'Connecting…',
-                    hintStyle: TextStyle(color: t.textDim, fontSize: 14),
+              // 输入框 + 发送/停止按钮：纵向居中。
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controller,
+                      minLines: 2,
+                      maxLines: 6,
+                      enabled: editable,
+                      cursorColor: t.accent,
+                      style: TextStyle(fontSize: 14, color: t.text, height: 1.4),
+                      decoration: InputDecoration(
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        isDense: true,
+                        filled: false,
+                        contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                        hintText: editable ? 'Ask Claude…' : 'Connecting…',
+                        hintStyle: TextStyle(color: t.textDim, fontSize: 14),
+                      ),
+                      textInputAction: TextInputAction.newline,
+                      keyboardType: TextInputType.multiline,
+                    ),
                   ),
-                  textInputAction: TextInputAction.newline,
-                  keyboardType: TextInputType.multiline,
-                ),
+                  const SizedBox(width: 8),
+                  _SendOrStopButton(
+                    busy: busy,
+                    canSend: canSend,
+                    onSubmit: onSubmit,
+                    onStop: onStop,
+                  ),
+                ],
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(6, 0, 6, 6),
-                child: Row(
-                  children: [
-                    _ToolBtn(
-                      icon: Icons.attach_file,
-                      tooltip: '附件',
-                      enabled: enabled,
-                      onTap: () {},
-                    ),
-                    _ToolBtn(
-                      icon: Icons.alternate_email,
-                      tooltip: '引用文件',
-                      enabled: enabled,
-                      onTap: () {},
-                    ),
-                    _ModelPicker(current: model, onPick: onSwitchModel),
-                    const Spacer(),
-                    _SendButton(enabled: enabled, onTap: onSubmit),
-                  ],
-                ),
+              const SizedBox(height: 4),
+              // 工具栏在按钮下方，左对齐。
+              Row(
+                children: [
+                  _ToolBtn(
+                    icon: Icons.attach_file,
+                    tooltip: '附件',
+                    enabled: connected,
+                    onTap: () {},
+                  ),
+                  _ToolBtn(
+                    icon: Icons.alternate_email,
+                    tooltip: '引用文件',
+                    enabled: connected,
+                    onTap: () {},
+                  ),
+                  _ModelPicker(current: model, onPick: onSwitchModel),
+                  const Spacer(),
+                ],
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 输入框右侧的 44×44 圆角方块按钮。
+/// - busy=false → 发送箭头，accent 色
+/// - busy=true  → 停止方块，红色
+/// - 不可用    → 灰
+class _SendOrStopButton extends StatelessWidget {
+  final bool busy;
+  final bool canSend;
+  final VoidCallback onSubmit;
+  final VoidCallback onStop;
+  const _SendOrStopButton({
+    required this.busy,
+    required this.canSend,
+    required this.onSubmit,
+    required this.onStop,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final bg = busy
+        ? t.error
+        : (canSend ? t.accent : t.surfaceHi);
+    final fg = (busy || canSend) ? Colors.white : t.textDim;
+    final radius = BorderRadius.circular(12);
+    return Material(
+      color: bg,
+      borderRadius: radius,
+      child: InkWell(
+        borderRadius: radius,
+        onTap: busy ? onStop : (canSend ? onSubmit : null),
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Icon(
+            busy ? Icons.stop_rounded : Icons.arrow_upward_rounded,
+            size: 22,
+            color: fg,
           ),
         ),
       ),
@@ -794,33 +1017,8 @@ class _ToolBtn extends StatelessWidget {
   }
 }
 
-class _SendButton extends StatelessWidget {
-  final bool enabled;
-  final VoidCallback onTap;
-  const _SendButton({required this.enabled, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final t = AppTokens.of(context);
-    return Material(
-      color: enabled ? t.accent : t.surfaceHi,
-      shape: const StadiumBorder(),
-      child: InkWell(
-        customBorder: const StadiumBorder(),
-        onTap: enabled ? onTap : null,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          child: Icon(
-            Icons.arrow_upward_rounded,
-            size: 16,
-            color: enabled ? Colors.white : t.textDim,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
+/// 流式 assistant 消息：每个 delta 都用 MarkdownBody 实时渲染，
+/// 跟最终 AssistantMsg 的样式保持一致——代码块/列表/链接在打字过程中就成型。
 class _StreamingMessage extends StatelessWidget {
   final StreamingAssistant buffer;
   const _StreamingMessage({required this.buffer});
@@ -853,15 +1051,41 @@ class _StreamingMessage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 6),
-          Text(
-            buffer.text.toString(),
-            style: TextStyle(fontSize: 14, color: t.text, height: 1.5),
+          MarkdownBody(
+            data: buffer.text.toString(),
+            selectable: true,
+            styleSheet: streamingMarkdownStyle(t),
           ),
         ],
       ),
     );
   }
 }
+
+/// 流式 / 最终消息共用的 markdown 样式表。
+MarkdownStyleSheet streamingMarkdownStyle(AppTokens t) => MarkdownStyleSheet(
+      p: TextStyle(color: t.text, fontSize: 13, height: 1.6),
+      code: TextStyle(
+        fontFamily: 'monospace',
+        fontSize: 12,
+        color: t.accent,
+        backgroundColor: t.surfaceHi,
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: t.surfaceHi,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: t.border, width: 0.5),
+      ),
+      codeblockPadding: const EdgeInsets.all(10),
+      blockquoteDecoration: BoxDecoration(
+        color: t.surfaceHi,
+        border: Border(left: BorderSide(color: t.accent, width: 3)),
+      ),
+      h1: TextStyle(color: t.text, fontSize: 16, fontWeight: FontWeight.w600),
+      h2: TextStyle(color: t.text, fontSize: 14, fontWeight: FontWeight.w600),
+      h3: TextStyle(color: t.text, fontSize: 13, fontWeight: FontWeight.w600),
+      listBullet: TextStyle(color: t.textMuted, fontSize: 13),
+    );
 
 class _EmptyState extends StatelessWidget {
   final IconData icon;

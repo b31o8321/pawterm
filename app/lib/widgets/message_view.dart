@@ -10,7 +10,11 @@ import 'tool_call_card.dart';
 
 class MessageView extends StatelessWidget {
   final IncomingMessage message;
-  const MessageView({super.key, required this.message});
+  /// tool_use_id → ToolResultBlock 索引（由 ChatTab 提前扫一遍消息列表得到）。
+  /// 让 ToolUseBlock 渲染时能找到对应 result，合并成一个折叠卡。
+  final Map<String, ToolResultBlock>? toolResults;
+
+  const MessageView({super.key, required this.message, this.toolResults});
 
   @override
   Widget build(BuildContext context) {
@@ -36,20 +40,22 @@ class MessageView extends StatelessWidget {
     }
 
     if (msg is UserMsg) {
-      // 历史会话里，UserMsg 既可能携带用户输入的 text，也可能携带 tool_result。
-      // - text 内容若是斜杠命令（<command-name>...）或命令输出/系统提示，渲染成紧凑 chip
-      // - 普通 text 渲染成右侧绿色气泡（和 LocalUserInput 一致）
-      // - tool_result/其它块按原样渲染在主流里
+      // UserMsg 可能携带：
+      // - 用户输入的 text（→ 右侧气泡 / 或 command-chip）
+      // - tool_result（→ 已合并到上方 ToolCallCard，这里跳过）
+      // 全是 tool_result 的 UserMsg（常见）整体不渲染，避免出现 0 高度空 item。
+      final children = <Widget>[];
+      for (final b in msg.content) {
+        if (b is TextBlock) {
+          final chip = _tryParseCommandChip(b.text);
+          children.add(chip ?? _UserBubble(text: b.text));
+        }
+        // 其它 block：tool_result 已经被 ToolCallCard 接管；其它非 text 类型本就没有渲染。
+      }
+      if (children.isEmpty) return const SizedBox.shrink();
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: msg.content.map((b) {
-          if (b is TextBlock) {
-            final chip = _tryParseCommandChip(b.text);
-            if (chip != null) return chip;
-            return _UserBubble(text: b.text);
-          }
-          return _renderBlock(context, b);
-        }).toList(),
+        children: children,
       );
     }
 
@@ -125,11 +131,15 @@ class MessageView extends StatelessWidget {
     }
 
     if (block is ToolUseBlock) {
-      return ToolCallCard(toolUse: block);
+      return ToolCallCard(
+        toolUse: block,
+        result: toolResults?[block.id],
+      );
     }
 
     if (block is ToolResultBlock) {
-      return ToolResultView(toolResult: block);
+      // ToolResult 已经被合并到上方对应 ToolCallCard 里展示了——这里不再单独出。
+      return const SizedBox.shrink();
     }
 
     return const SizedBox.shrink();

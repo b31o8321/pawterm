@@ -73,22 +73,44 @@ export async function registerSessionsApi(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /**
+   * Paginated session messages — reverse-infinite-scroll friendly.
+   *
+   *   GET /sessions/:id/messages?cwd=...&limit=50
+   *     → 最后 50 条（首屏），按 chronological order 升序。
+   *
+   *   GET /sessions/:id/messages?cwd=...&limit=50&before_uuid=<uuid>
+   *     → 找到该 uuid 在完整链中的位置，取它**前面**的 50 条。
+   *
+   * 响应：
+   *   { messages: [...], has_more: boolean, total: number }
+   *
+   * SDK 的 getSessionMessages(offset/limit) 是从开头算 offset，
+   * 而我们需要"最近 N 条"语义；最稳妥的方式是先一次读全（JSONL parse 快、
+   * 本地磁盘），再在内存里 slice。1000 条以内毫秒级。
+   */
   app.get<{
     Params: { id: string };
-    Querystring: { cwd: string; limit?: string; offset?: string };
+    Querystring: { cwd: string; limit?: string; before_uuid?: string };
   }>('/sessions/:id/messages', async (req) => {
     const cwd = requirePath(req.query.cwd);
-    const limit = req.query.limit ? Number(req.query.limit) : 200;
-    const offset = req.query.offset ? Number(req.query.offset) : 0;
-    const msgs: SessionMessage[] = await getSessionMessages(req.params.id, {
-      dir: cwd,
-      limit,
-      offset,
-    });
+    const limit = req.query.limit ? Math.max(1, Math.min(500, Number(req.query.limit))) : 50;
+    const beforeUuid = req.query.before_uuid;
+
+    const all: SessionMessage[] = await getSessionMessages(req.params.id, { dir: cwd });
+    const total = all.length;
+
+    let upper = total; // exclusive
+    if (beforeUuid) {
+      const idx = all.findIndex((m) => (m as { uuid?: string }).uuid === beforeUuid);
+      if (idx > 0) upper = idx;
+    }
+    const lower = Math.max(0, upper - limit);
+    const slice = all.slice(lower, upper);
+
     return {
-      messages: msgs.map((sm) => {
+      messages: slice.map((sm) => {
         const rawTs = (sm as { timestamp?: string | number }).timestamp;
-        // JSONL persists ISO strings; live SDK objects use epoch ms.
         const ts =
           typeof rawTs === 'string' ? Date.parse(rawTs) :
           typeof rawTs === 'number' ? rawTs :
@@ -98,10 +120,11 @@ export async function registerSessionsApi(app: FastifyInstance): Promise<void> {
           uuid: (sm as { uuid?: string }).uuid ?? null,
           parent_uuid: (sm as { parent_uuid?: string }).parent_uuid ?? null,
           timestamp: ts,
-          // Embed timestamp into the message itself so client doesn't have to thread it.
           message: wire ? { ...wire, timestamp: ts ?? undefined } : sm,
         };
       }),
+      has_more: lower > 0,
+      total,
     };
   });
 
