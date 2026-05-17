@@ -1,34 +1,35 @@
 import type { FastifyInstance } from 'fastify';
 import { resolve } from 'node:path';
+import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 
 import type { AnswerQuestionRequest, PermissionMode } from '@cc/shared';
 
 import { isPathAllowed, settings } from './config.js';
 import { AskUserQuestionRegistry } from './ask-user-tool.js';
 import { EventBuffer } from './event-buffer.js';
+import { findHolder } from './holder-detect.js';
 import { messageToWire } from './serialize.js';
 import { ChatSession } from './session-manager.js';
 
-interface SessionEntry {
+interface RunEntry {
   session: ChatSession;
   buffer: EventBuffer;
   askRegistry: AskUserQuestionRegistry;
+  /** Grace timer: starts when result arrives, clears run after GRACE_MS. */
   graceTimer?: NodeJS.Timeout;
   writers: Set<{ write: (s: string) => void; end: () => void }>;
+  /** True once a result event has been emitted for this turn. */
+  resultReceived: boolean;
 }
 
-const sessions = new Map<string, SessionEntry>();
-const GRACE_MS = 30_000;
+/** Key = Claude UUID (same as jsonl filename). Only present during an active turn. */
+const activeRuns = new Map<string, RunEntry>();
+const GRACE_MS = 60_000;
 const HEARTBEAT_MS = 15_000;
 
-function makeSessionId(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-function broadcast(entry: SessionEntry, type: string, data: unknown): void {
+function broadcast(entry: RunEntry, type: string, data: unknown): void {
   const ev = entry.buffer.push(type, data);
   const payload = `id: ${ev.id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
-  // Snapshot to avoid mutation-during-iteration when we prune dead writers.
   for (const w of [...entry.writers]) {
     try {
       w.write(payload);
@@ -38,39 +39,37 @@ function broadcast(entry: SessionEntry, type: string, data: unknown): void {
   }
 }
 
-function cancelGrace(entry: SessionEntry): void {
+function cancelGrace(entry: RunEntry): void {
   if (entry.graceTimer) {
     clearTimeout(entry.graceTimer);
     entry.graceTimer = undefined;
   }
 }
 
-function startGrace(id: string, entry: SessionEntry): void {
+function startGrace(uuid: string, entry: RunEntry): void {
   if (entry.graceTimer) return;
   entry.graceTimer = setTimeout(() => {
-    closeSession(id);
+    closeRun(uuid);
   }, GRACE_MS);
 }
 
-function closeSession(id: string): void {
-  const entry = sessions.get(id);
+function closeRun(uuid: string): void {
+  const entry = activeRuns.get(uuid);
   if (!entry) return;
   cancelGrace(entry);
-  entry.askRegistry.rejectAll('session closed');
-  entry.session.close();
+  entry.askRegistry.rejectAll('run closed');
+  // Interrupt first so the SDK subprocess actually stops, then close input gen.
+  entry.session.interrupt().finally(() => {
+    entry.session.close();
+  });
   for (const w of entry.writers) {
     try { w.end(); } catch { /* */ }
   }
-  sessions.delete(id);
+  activeRuns.delete(uuid);
 }
 
 const ASK_TOOL_NAME = 'mcp__ask-user-question__AskUserQuestion';
 
-/**
- * If the wire message is an assistant message containing an AskUserQuestion
- * tool_use block, store the tool_use_id in registry.pendingToolUseId so the
- * MCP handler (which runs synchronously after this broadcast) can register it.
- */
 function maybeSetPendingToolUseId(wire: ReturnType<typeof messageToWire>, registry: AskUserQuestionRegistry): void {
   if (!wire || wire.type !== 'assistant') return;
   const content = (wire as { content?: unknown[] }).content;
@@ -87,64 +86,103 @@ function maybeSetPendingToolUseId(wire: ReturnType<typeof messageToWire>, regist
   }
 }
 
-async function consumeSdk(id: string, entry: SessionEntry): Promise<void> {
+async function consumeSdk(uuid: string, entry: RunEntry): Promise<void> {
   try {
     const iter = entry.session.start();
     for await (const sdkMsg of iter) {
       const wire = messageToWire(sdkMsg);
       if (wire) {
         const stamped = { ...wire, timestamp: Date.now() };
-        // Set pendingToolUseId BEFORE broadcasting so the MCP handler
-        // (which fires right after the SDK calls our in-process server) sees it.
         maybeSetPendingToolUseId(wire, entry.askRegistry);
         broadcast(entry, (wire as { type: string }).type, stamped);
+        // When result arrives: mark it and start grace timer.
+        // The run stays in activeRuns during grace so reconnects can replay.
+        if ((wire as { type: string }).type === 'result') {
+          entry.resultReceived = true;
+          startGrace(uuid, entry);
+        }
       }
     }
   } catch (err) {
     broadcast(entry, 'error', { type: 'error', message: (err as Error).message });
+    entry.resultReceived = true;
+    startGrace(uuid, entry);
   } finally {
-    // SDK iterator ended (naturally or via error). Tear down so reconnects
-    // get a fresh 404 rather than a session that silently ignores messages.
-    closeSession(id);
+    // If consumeSdk ends without a result (e.g. session.close() called before
+    // SDK emitted result), make sure grace starts so we don't leak the entry.
+    if (!entry.resultReceived) {
+      entry.resultReceived = true;
+      startGrace(uuid, entry);
+    }
   }
 }
 
 export async function registerChatRest(app: FastifyInstance): Promise<void> {
-  app.post<{ Body: { cwd?: string; permission_mode?: PermissionMode; resume?: string; model?: string } }>(
-    '/chat/start',
+  /**
+   * Start a new turn. Creates a fresh RunEntry for the given Claude UUID.
+   *
+   * Body: { cwd, text, model?, permission_mode? }
+   *
+   * - If uuid already has an active run → 409
+   * - If session exists on disk (getSessionInfo finds it) → resume: uuid
+   * - If not → sessionId: uuid  (new session with client-provided UUID)
+   */
+  app.post<{
+    Params: { uuid: string };
+    Body: { cwd?: string; text?: string; model?: string; permission_mode?: PermissionMode };
+  }>(
+    '/chat/:uuid/turn',
     async (req, reply) => {
+      const { uuid } = req.params;
       const body = req.body ?? {};
+
       if (!body.cwd) { reply.code(400); return { error: 'cwd required' }; }
+      if (!body.text) { reply.code(400); return { error: 'text required' }; }
+
       const cwd = resolve(body.cwd);
       if (!isPathAllowed(cwd)) { reply.code(403); return { error: `Project not allowed: ${cwd}` }; }
+
+      if (activeRuns.has(uuid)) {
+        reply.code(409);
+        return { error: 'turn already active for this session' };
+      }
+
       const permissionMode = body.permission_mode ?? settings.permissionMode;
-      const id = makeSessionId();
+
+      // Determine whether to resume or create new.
+      const existing = await getSessionInfo(uuid, { dir: cwd });
       const askRegistry = new AskUserQuestionRegistry();
       const session = new ChatSession({
-        cwd, permissionMode, resume: body.resume, model: body.model, askRegistry,
-      });
-      const entry: SessionEntry = { session, buffer: new EventBuffer(), askRegistry, writers: new Set() };
-      sessions.set(id, entry);
-      consumeSdk(id, entry).catch(() => {});
-      // Startup grace: if the client never opens /chat/:id/events, tear the
-      // session down after GRACE_MS. The first SSE connect cancels this.
-      startGrace(id, entry);
-      return {
-        session_id: id,
         cwd,
-        permission_mode: permissionMode,
-        resumed: body.resume ?? null,
+        permissionMode,
+        ...(existing ? { resume: uuid } : { sessionId: uuid }),
+        model: body.model,
+        askRegistry,
+      });
+
+      const entry: RunEntry = {
+        session,
+        buffer: new EventBuffer(2000),   // larger buffer for long runs
+        askRegistry,
+        writers: new Set(),
+        resultReceived: false,
       };
+      activeRuns.set(uuid, entry);
+
+      // Push the user message then start consuming.
+      session.pushUserMessage(body.text);
+      consumeSdk(uuid, entry).catch(() => {});
+
+      return { ok: true };
     },
   );
 
-  app.get<{ Params: { id: string }; Querystring: { lastEventId?: string } }>(
-    '/chat/:id/events',
+  app.get<{ Params: { uuid: string }; Querystring: { lastEventId?: string } }>(
+    '/chat/:uuid/events',
     (req, reply) => {
-      const { id } = req.params;
-      const entry = sessions.get(id);
-      if (!entry) { reply.code(404); return reply.send({ error: 'session not found' }); }
-      cancelGrace(entry);
+      const { uuid } = req.params;
+      const entry = activeRuns.get(uuid);
+      if (!entry) { reply.code(404); return reply.send({ error: 'no active turn' }); }
 
       const lastIdHeader = (req.headers['last-event-id'] as string | undefined) ?? req.query.lastEventId;
       const lastId = lastIdHeader ? parseInt(lastIdHeader, 10) : 0;
@@ -165,9 +203,16 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       };
       entry.writers.add(writer);
 
+      // Replay missed events.
       if (lastId > 0) {
         const replay = entry.buffer.since(lastId) ?? [];
         for (const e of replay) {
+          writer.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`);
+        }
+      } else if (lastId === 0 && entry.buffer.newestId > 0) {
+        // New subscriber: replay all buffered events from this turn.
+        const all = entry.buffer.since(0) ?? [];
+        for (const e of all) {
           writer.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`);
         }
       }
@@ -176,89 +221,102 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
         try {
           writer.write(`: heartbeat\n\n`);
         } catch {
-          // Writer dead; clean up. The 'close' handler will also run, but make this idempotent.
           entry.writers.delete(writer);
           clearInterval(heartbeat);
-          if (entry.writers.size === 0) {
-            startGrace(id, entry);
-          }
         }
       }, HEARTBEAT_MS);
 
       req.raw.on('close', () => {
         clearInterval(heartbeat);
         entry.writers.delete(writer);
-        if (entry.writers.size === 0) {
-          startGrace(id, entry);
-        }
+        // NOTE: disconnecting does NOT trigger grace. Grace only starts on result.
       });
 
-      return reply;  // hijacked stream; don't auto-end
+      return reply;
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { text: string } }>(
-    '/chat/:id/message',
-    async (req, reply) => {
-      const entry = sessions.get(req.params.id);
-      if (!entry) { reply.code(404); return { error: 'session not found' }; }
-      entry.session.pushUserMessage(req.body.text);
-      return { ok: true };
+  /**
+   * GET /chat/:uuid/status — three-signal turn state.
+   * 'live'    → activeRuns has entry, result not yet received
+   * 'done'    → activeRuns has entry but result already received (in grace)
+   * 'running' → no activeRun but PID holder found
+   * 'unknown' → no activeRun and no holder
+   */
+  app.get<{ Params: { uuid: string }; Querystring: { cwd?: string } }>(
+    '/chat/:uuid/status',
+    async (req) => {
+      const { uuid } = req.params;
+      const entry = activeRuns.get(uuid);
+      if (entry) {
+        return { state: entry.resultReceived ? 'done' : 'live' };
+      }
+      // Check PID holder as secondary signal.
+      const holder = await findHolder(uuid).catch(() => null);
+      if (holder) {
+        return { state: 'running', holder };
+      }
+      return { state: 'unknown' };
     },
   );
 
-  app.post<{ Params: { id: string } }>('/chat/:id/interrupt', async (req, reply) => {
-    const entry = sessions.get(req.params.id);
-    if (!entry) { reply.code(404); return { error: 'session not found' }; }
+  app.post<{ Params: { uuid: string } }>('/chat/:uuid/interrupt', async (req, reply) => {
+    const entry = activeRuns.get(req.params.uuid);
+    if (!entry) { reply.code(404); return { error: 'no active turn' }; }
     await entry.session.interrupt();
     return { ok: true };
   });
 
-  app.post<{ Params: { id: string }; Body: { model: string } }>(
-    '/chat/:id/set-model',
+  app.post<{ Params: { uuid: string }; Body: { model: string } }>(
+    '/chat/:uuid/set-model',
     async (req, reply) => {
-      const entry = sessions.get(req.params.id);
-      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      const entry = activeRuns.get(req.params.uuid);
+      if (!entry) { reply.code(404); return { error: 'no active turn' }; }
       await entry.session.setModel(req.body.model);
       return { ok: true };
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { mode: PermissionMode } }>(
-    '/chat/:id/set-permission-mode',
+  app.post<{ Params: { uuid: string }; Body: { mode: PermissionMode } }>(
+    '/chat/:uuid/set-permission-mode',
     async (req, reply) => {
-      const entry = sessions.get(req.params.id);
-      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      const entry = activeRuns.get(req.params.uuid);
+      if (!entry) { reply.code(404); return { error: 'no active turn' }; }
       await entry.session.setPermissionMode(req.body.mode);
       return { ok: true };
     },
   );
 
-  app.post<{ Params: { id: string }; Body: AnswerQuestionRequest }>(
-    '/chat/:id/answer-question',
+  app.post<{ Params: { uuid: string }; Body: AnswerQuestionRequest }>(
+    '/chat/:uuid/answer-question',
     async (req, reply) => {
-      const entry = sessions.get(req.params.id);
-      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      const entry = activeRuns.get(req.params.uuid);
+      if (!entry) { reply.code(404); return { error: 'no active turn' }; }
       const ok = entry.session.answerQuestion(
         req.body.tool_use_id,
         req.body.answers,
         req.body.annotations,
       );
       if (!ok) {
-        // Answered too late or unknown tool_use_id — not fatal, just log.
         app.log.warn({ toolUseId: req.body.tool_use_id }, 'answer_question: no pending tool');
       }
       return { ok };
     },
   );
 
-  app.delete<{ Params: { id: string } }>('/chat/:id', async (req) => {
-    closeSession(req.params.id);
+  app.delete<{ Params: { uuid: string } }>('/chat/:uuid', async (req) => {
+    closeRun(req.params.uuid);
     return { ok: true };
   });
 }
 
-// Exported only for AskUserQuestion wiring in later tasks to access registry/session.
-export function getSessionEntry(id: string): SessionEntry | undefined {
-  return sessions.get(id);
+/** Exported for AskUserQuestion wiring. */
+export function getRunEntry(uuid: string): RunEntry | undefined {
+  return activeRuns.get(uuid);
 }
+
+/**
+ * @deprecated Use getRunEntry. Kept for backward compat with ask-user-tool.ts
+ * which may reference getSessionEntry.
+ */
+export const getSessionEntry = getRunEntry;
