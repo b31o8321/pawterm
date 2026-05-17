@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../i18n/locale_provider.dart';
+import '../state/app_info.dart';
 import '../theme.dart';
 
 class SettingsScreen extends ConsumerWidget {
@@ -44,7 +45,14 @@ class SettingsScreen extends ConsumerWidget {
           ListTile(
             leading: Icon(Icons.bookmark_outline, size: 18, color: t.textMuted),
             title: Text(s.settingsVersion, style: TextStyle(color: t.text, fontSize: 13)),
-            trailing: Text('0.1.0', style: TextStyle(color: t.textDim, fontSize: 11, fontFamily: 'monospace')),
+            trailing: ref.watch(packageInfoProvider).when(
+              data: (info) => Text(
+                'v${info.version}',
+                style: TextStyle(color: t.textDim, fontSize: 11, fontFamily: 'monospace'),
+              ),
+              loading: () => Text('…', style: TextStyle(color: t.textDim, fontSize: 11)),
+              error: (_, __) => Text('—', style: TextStyle(color: t.textDim, fontSize: 11)),
+            ),
             dense: true,
           ),
         ],
