@@ -45,6 +45,7 @@ class SseClient {
   }
 
   Future<void> _connectOnce() async {
+    _httpClient?.close();
     _httpClient = http.Client();
     final request = http.Request('GET', url);
     request.headers.addAll({
@@ -124,6 +125,7 @@ class SseClient {
     }
     if (dataLines.isEmpty && id == null) return; // pure comment block
     if (id != null) _lastEventId = id;
+    if (_closed) return;
     _events.add(SseEvent(id: id, type: type, data: dataLines.join('\n')));
   }
 

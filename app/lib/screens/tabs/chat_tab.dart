@@ -148,8 +148,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   String _sessionKey(CurrentSession s) =>
       '${s.cwd}|${s.resumeId ?? "new"}|${s.readOnly ? "ro" : "rw"}';
 
-  // Throttle reconnect attempts so a dead server doesn't trigger a tight loop.
-  // Once attempted, only the user-visible "reconnect" button will retry.
+  // Throttle session-start attempts so a dead server doesn't trigger a tight loop.
+  // Once api.start() failed, only the user-visible "reconnect" button will retry.
+  // (SSE drops are handled by SseClient's own backoff loop; this debounce gates
+  // only the initial REST handshake.)
   String? _attemptedKey;
   bool _attempting = false;
 
@@ -551,6 +553,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _handleWireMessage(Map<String, dynamic> json) {
+    if (!mounted) return;
     final msg = IncomingMessage.fromJson(json);
     setState(() {
       if (msg is SessionReady) {
