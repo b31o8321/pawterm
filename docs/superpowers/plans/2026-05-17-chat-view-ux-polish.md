@@ -31,6 +31,7 @@
 - `app/pubspec.yaml` — 加 `file_picker: ^8.0.0` 依赖
 - `app/lib/screens/tabs/chat_tab.dart` — `_SendOrStopButton` 改造 + `_Composer` 加附件 + 加 `_sendAnswerQuestion()`
 - `app/lib/widgets/message_view.dart` — `ToolUseBlock` 分发新增 AskUserQuestion 分支
+- `app/lib/widgets/tool_call_card.dart` — 新增 `_JsonBlock` + `_renderBody` default 分支条件切换
 
 ---
 
@@ -272,6 +273,115 @@ the client. Image blocks are preserved as-is.
 Adds vitest + snapshot tests for normalizeToolResultContent.
 EOF
 )"
+```
+
+---
+
+## Task 1b: §3b Client tool_use input pretty-JSON 渲染
+
+**目标**：自定义 / MCP 工具的 input 含嵌套 Map/List 时，渲染为美化 JSON 代码块；浅层 input 保留现有内联键值显示。
+
+**Files:**
+- Modify: `app/lib/widgets/tool_call_card.dart`（顶部 import、`_renderBody` default 分支、文件末尾新增 `_JsonBlock`）
+
+### Step 1b.1: 顶部加 dart:convert import
+
+- [ ] 在 `app/lib/widgets/tool_call_card.dart` 顶部 import 区追加（如果还没有）：
+
+```dart
+import 'dart:convert';
+```
+
+### Step 1b.2: 改 _renderBody 的 default 分支
+
+- [ ] 找到 `_renderBody` 方法（grep `Widget _renderBody`），把 default 分支替换：
+
+原代码：
+```dart
+default:
+  return _KeyValueList(map: input);
+```
+
+替换为：
+```dart
+default:
+  final hasNested = input.values.any((v) => v is Map || v is List);
+  return hasNested
+      ? _JsonBlock(value: input)
+      : _KeyValueList(map: input);
+```
+
+### Step 1b.3: 在文件末尾新增 _JsonBlock 组件
+
+- [ ] 把这段加在 `_KeyValueList` 类下面（约 370 行后）：
+
+```dart
+/// Pretty-JSON 代码块。用于嵌套结构（Map/List）的 tool input / 通用对象展示。
+/// 与 _outputBody 相同的视觉规格（黑底 + monospace + textMuted）。
+class _JsonBlock extends StatelessWidget {
+  final Object? value;
+  const _JsonBlock({required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    const enc = JsonEncoder.withIndent('  ');
+    // jsonEncode 对非 JSON-safe 值（如 DateTime）会抛；保护一下
+    String text;
+    try {
+      text = enc.convert(value);
+    } catch (_) {
+      text = value.toString();
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: t.bg,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: t.borderSubt, width: 0.5),
+      ),
+      child: SelectableText(
+        text,
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: t.textMuted,
+          height: 1.5,
+        ),
+      ),
+    );
+  }
+}
+```
+
+### Step 1b.4: flutter analyze
+
+- [ ] Run:
+
+```bash
+cd /Users/airoucat/workspace/shulex/claude-companion/app
+flutter analyze lib/widgets/tool_call_card.dart
+```
+
+Expected: 无 error。
+
+### Step 1b.5: 手动 smoke
+
+- [ ] 启 server + app
+- [ ] 让 Claude 调一个嵌套 input 的工具（最方便的是：让它调 `mcp__ask-user-question__AskUserQuestion` —— Task 8 之后才有；或者临时让 Claude 用 `WebFetch` 传一个嵌套 prompt 对象）
+- [ ] 当 tool input 嵌套时，期望看到 JSON 代码块（多行、缩进 2 格）
+- [ ] 当 tool input 是浅层（如 `{ pattern: '...', path: '...' }`），期望仍是 inline `key: value` 形式
+
+Note: 这一步在 Task 1 提交之后、AskUserQuestion 还没就绪之前可以暂时只用现有工具做 smoke（例如让 Claude 用 `WebFetch` 配置某些嵌套参数）。彻底 e2e 验证留到 Task 12。
+
+### Step 1b.6: Commit
+
+- [ ] Run:
+
+```bash
+git add app/lib/widgets/tool_call_card.dart
+git commit -m "feat(chat): pretty-JSON rendering for nested tool_use input"
 ```
 
 ---
@@ -2626,7 +2736,8 @@ git commit -m "chore: misc polish from Spec A implementation"
 |---|---|
 | §1 按钮 | Task 2 |
 | §2 附件 | Task 3 (server) + Task 4 (client) |
-| §3 JSON 修复 | Task 1 |
+| §3a tool_result JSON | Task 1 |
+| §3b tool_use input JSON | Task 1b |
 | §4.1-4.2 架构 + Server | Task 6 + 7 + 8 |
 | §4.3 协议 | Task 5 |
 | §4.3-4.4 Client 渲染 | Task 9 (skeleton) + 10 (form) + 11 (preview) |

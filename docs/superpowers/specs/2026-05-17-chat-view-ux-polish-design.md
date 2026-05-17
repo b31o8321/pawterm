@@ -160,11 +160,21 @@ final payload = attachLines.isEmpty
 
 发送完成后清空 `_attachments`。
 
-### 3. tool 输出对象渲染修复
+### 3. tool 输出 / 输入对象渲染修复
 
-**改动位置**：`server/src/serialize.ts::normalizeToolResultContent`
+**3a. tool_result 输出**（server 侧）— 改动位置：`server/src/serialize.ts::normalizeToolResultContent`
 
-**修复**：
+**3b. tool_use 输入**（client 侧）— 改动位置：`app/lib/widgets/tool_call_card.dart::_KeyValueList` + default 分支
+
+**Client 侧问题**：自定义 MCP 工具（如 `mcp__ask-user-question__AskUserQuestion`）的 input 含嵌套 Map/List 时，现有 `_KeyValueList` 用 `.toString()` 渲染，得到 `key: {a: 1, b: 2}` 这种 Dart Map 内联字面量，深层嵌套时不可读。
+
+**修复**：在 `_renderBody` 的 `default` 分支，检测 input 是否含 `Map` / `List` 值；
+- 有 → 渲染为 pretty JSON 代码块（monospace + 黑底，跟 tool_result 输出同款）
+- 无 → 维持现有 `_KeyValueList` 内联键值
+
+Read / Edit / Bash / Grep / Glob / TodoWrite 等已有专门 renderer 不变。
+
+**3a 修复**：
 
 ```ts
 function normalizeToolResultContent(content: unknown): any {
@@ -190,7 +200,49 @@ function normalizeToolResultContent(content: unknown): any {
 }
 ```
 
-**Client 侧**：无改动。`tool_call_card.dart::_outputBody` 已经是 monospace + 黑底渲染，pretty JSON 直接好看。
+**Client 侧（3a）**：无改动。`tool_call_card.dart::_outputBody` 已经是 monospace + 黑底渲染，pretty JSON 直接好看。
+
+**3b 修复**（client 侧 tool_use input）：
+
+在 `_renderBody` default 分支：
+
+```dart
+default:
+  final hasNested = input.values.any((v) => v is Map || v is List);
+  return hasNested
+      ? _JsonBlock(value: input)
+      : _KeyValueList(map: input);
+```
+
+新增 `_JsonBlock`：
+
+```dart
+class _JsonBlock extends StatelessWidget {
+  final Object? value;
+  const _JsonBlock({required this.value});
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    const enc = JsonEncoder.withIndent('  ');
+    final text = enc.convert(value);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: t.bg,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: t.borderSubt, width: 0.5),
+      ),
+      child: SelectableText(
+        text,
+        style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: t.textMuted, height: 1.5),
+      ),
+    );
+  }
+}
+```
+
+顶部加 `import 'dart:convert';`。
 
 **验证**：测试样本 — 调一个返回 JSON 对象的 MCP 工具，或者用 `Bash` 跑 `echo '{"a":1,"b":[2,3]}'` 然后让 Claude 解释（解释步骤里可能产生包含 JSON 结构的内部 tool_result）。修改前显示 `[object Object]`，修改后显示美化 JSON。
 
