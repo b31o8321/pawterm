@@ -767,6 +767,16 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     }
   }
 
+  /// 把用户对 AskUserQuestion 工具的回答通过 REST 发给 server。
+  void _sendAnswerQuestion(
+    String toolUseId,
+    Map<String, String> answers,
+    Map<String, Map<String, String>>? annotations,
+  ) {
+    if (_sessionId == null || _chatApi == null) return;
+    unawaited(_chatApi!.answerQuestion(_sessionId!, toolUseId, answers, annotations));
+  }
+
   /// 弹文件选择器，把每个选中的文件都登记为 uploading 状态并启动并发上传。
   Future<void> _pickAndUploadAttachments() async {
     final result = await FilePicker.platform.pickFiles(allowMultiple: true);
@@ -909,7 +919,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
                           return _UserMessage(text: m.text, timestamp: m.timestamp);
                         }
                         if (m is StreamingAssistant) return _StreamingMessage(buffer: m);
-                        return MessageView(message: m, toolResults: toolResults);
+                        return MessageView(
+                          message: m,
+                          toolResults: toolResults,
+                          onAnswerQuestion: _sendAnswerQuestion,
+                        );
                       },
                     ),
               // Right-bottom "jump to bottom" button — only shown when the user
