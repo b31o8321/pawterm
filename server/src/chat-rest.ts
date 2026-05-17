@@ -26,8 +26,13 @@ function makeSessionId(): string {
 function broadcast(entry: SessionEntry, type: string, data: unknown): void {
   const ev = entry.buffer.push(type, data);
   const payload = `id: ${ev.id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const w of entry.writers) {
-    try { w.write(payload); } catch { /* writer gone */ }
+  // Snapshot to avoid mutation-during-iteration when we prune dead writers.
+  for (const w of [...entry.writers]) {
+    try {
+      w.write(payload);
+    } catch {
+      entry.writers.delete(w);
+    }
   }
 }
 
@@ -68,8 +73,11 @@ async function consumeSdk(id: string, entry: SessionEntry): Promise<void> {
     }
   } catch (err) {
     broadcast(entry, 'error', { type: 'error', message: (err as Error).message });
+  } finally {
+    // SDK iterator ended (naturally or via error). Tear down so reconnects
+    // get a fresh 404 rather than a session that silently ignores messages.
+    closeSession(id);
   }
-  void id;
 }
 
 export async function registerChatRest(app: FastifyInstance): Promise<void> {
@@ -88,6 +96,9 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       const entry: SessionEntry = { session, buffer: new EventBuffer(), writers: new Set() };
       sessions.set(id, entry);
       consumeSdk(id, entry).catch(() => {});
+      // Startup grace: if the client never opens /chat/:id/events, tear the
+      // session down after GRACE_MS. The first SSE connect cancels this.
+      startGrace(id, entry);
       return {
         session_id: id,
         cwd,
@@ -112,6 +123,7 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
         if (probe === null) { reply.code(412); return reply.send({ error: 'event gap, please reload' }); }
       }
 
+      reply.hijack();
       reply.raw.setHeader('Content-Type', 'text/event-stream');
       reply.raw.setHeader('Cache-Control', 'no-cache');
       reply.raw.setHeader('Connection', 'keep-alive');
@@ -131,7 +143,16 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       }
 
       const heartbeat = setInterval(() => {
-        try { writer.write(`: heartbeat\n\n`); } catch { /* */ }
+        try {
+          writer.write(`: heartbeat\n\n`);
+        } catch {
+          // Writer dead; clean up. The 'close' handler will also run, but make this idempotent.
+          entry.writers.delete(writer);
+          clearInterval(heartbeat);
+          if (entry.writers.size === 0) {
+            startGrace(id, entry);
+          }
+        }
       }, HEARTBEAT_MS);
 
       req.raw.on('close', () => {
