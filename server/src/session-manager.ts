@@ -1,6 +1,7 @@
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk';
 
 import type { PermissionMode } from '@cc/shared';
+import { type AskUserQuestionRegistry, formatAnswers, makeAskUserMcpServer } from './ask-user-tool.js';
 
 /**
  * One ClaudeSDK conversation. We use the SDK's streaming `query()` with an
@@ -17,12 +18,20 @@ export class ChatSession {
   private inputQueue: any[] = [];
   private finished = false;
   private iter?: AsyncGenerator<any>;
+  private readonly askRegistry: AskUserQuestionRegistry;
 
-  constructor(opts: { cwd: string; permissionMode: PermissionMode; resume?: string; model?: string }) {
+  constructor(opts: {
+    cwd: string;
+    permissionMode: PermissionMode;
+    resume?: string;
+    model?: string;
+    askRegistry: AskUserQuestionRegistry;
+  }) {
     this.cwd = opts.cwd;
     this.permissionMode = opts.permissionMode;
     this.resume = opts.resume;
     this.model = opts.model;
+    this.askRegistry = opts.askRegistry;
   }
 
   /** Build the async iterator the SDK will read user messages from. */
@@ -52,6 +61,9 @@ export class ChatSession {
       permissionMode: this.permissionMode,
       // Emit SDKPartialAssistantMessage events for char-level streaming.
       includePartialMessages: true,
+      mcpServers: {
+        'ask-user-question': makeAskUserMcpServer(this.askRegistry),
+      },
       ...(bypassing ? { allowDangerouslySkipPermissions: true } : {}),
       ...(this.resume ? { resume: this.resume } : {}),
       ...(this.model ? { model: this.model } : {}),
@@ -88,6 +100,18 @@ export class ChatSession {
     } else {
       this.inputQueue.push(msg);
     }
+  }
+
+  /**
+   * Called from the REST answer-question route. Resolves the pending
+   * AskUserQuestion tool call so Claude can continue.
+   */
+  answerQuestion(
+    toolUseId: string,
+    answers: Record<string, string>,
+    annotations?: Record<string, { preview?: string; notes?: string }>,
+  ): boolean {
+    return this.askRegistry.answer(toolUseId, formatAnswers(answers, annotations));
   }
 
   async interrupt(): Promise<void> {

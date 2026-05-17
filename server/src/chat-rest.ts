@@ -1,9 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { resolve } from 'node:path';
 
-import type { PermissionMode } from '@cc/shared';
+import type { AnswerQuestionRequest, PermissionMode } from '@cc/shared';
 
 import { isPathAllowed, settings } from './config.js';
+import { AskUserQuestionRegistry } from './ask-user-tool.js';
 import { EventBuffer } from './event-buffer.js';
 import { messageToWire } from './serialize.js';
 import { ChatSession } from './session-manager.js';
@@ -11,6 +12,7 @@ import { ChatSession } from './session-manager.js';
 interface SessionEntry {
   session: ChatSession;
   buffer: EventBuffer;
+  askRegistry: AskUserQuestionRegistry;
   graceTimer?: NodeJS.Timeout;
   writers: Set<{ write: (s: string) => void; end: () => void }>;
 }
@@ -54,11 +56,35 @@ function closeSession(id: string): void {
   const entry = sessions.get(id);
   if (!entry) return;
   cancelGrace(entry);
+  entry.askRegistry.rejectAll('session closed');
   entry.session.close();
   for (const w of entry.writers) {
     try { w.end(); } catch { /* */ }
   }
   sessions.delete(id);
+}
+
+const ASK_TOOL_NAME = 'mcp__ask-user-question__AskUserQuestion';
+
+/**
+ * If the wire message is an assistant message containing an AskUserQuestion
+ * tool_use block, store the tool_use_id in registry.pendingToolUseId so the
+ * MCP handler (which runs synchronously after this broadcast) can register it.
+ */
+function maybeSetPendingToolUseId(wire: ReturnType<typeof messageToWire>, registry: AskUserQuestionRegistry): void {
+  if (!wire || wire.type !== 'assistant') return;
+  const content = (wire as { content?: unknown[] }).content;
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (
+      block && typeof block === 'object' &&
+      (block as { type?: string }).type === 'tool_use' &&
+      (block as { name?: string }).name === ASK_TOOL_NAME
+    ) {
+      registry.pendingToolUseId = (block as { id?: string }).id ?? null;
+      return;
+    }
+  }
 }
 
 async function consumeSdk(id: string, entry: SessionEntry): Promise<void> {
@@ -68,6 +94,9 @@ async function consumeSdk(id: string, entry: SessionEntry): Promise<void> {
       const wire = messageToWire(sdkMsg);
       if (wire) {
         const stamped = { ...wire, timestamp: Date.now() };
+        // Set pendingToolUseId BEFORE broadcasting so the MCP handler
+        // (which fires right after the SDK calls our in-process server) sees it.
+        maybeSetPendingToolUseId(wire, entry.askRegistry);
         broadcast(entry, (wire as { type: string }).type, stamped);
       }
     }
@@ -90,10 +119,11 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       if (!isPathAllowed(cwd)) { reply.code(403); return { error: `Project not allowed: ${cwd}` }; }
       const permissionMode = body.permission_mode ?? settings.permissionMode;
       const id = makeSessionId();
+      const askRegistry = new AskUserQuestionRegistry();
       const session = new ChatSession({
-        cwd, permissionMode, resume: body.resume, model: body.model,
+        cwd, permissionMode, resume: body.resume, model: body.model, askRegistry,
       });
-      const entry: SessionEntry = { session, buffer: new EventBuffer(), writers: new Set() };
+      const entry: SessionEntry = { session, buffer: new EventBuffer(), askRegistry, writers: new Set() };
       sessions.set(id, entry);
       consumeSdk(id, entry).catch(() => {});
       // Startup grace: if the client never opens /chat/:id/events, tear the
@@ -201,6 +231,24 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       if (!entry) { reply.code(404); return { error: 'session not found' }; }
       await entry.session.setPermissionMode(req.body.mode);
       return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: AnswerQuestionRequest }>(
+    '/chat/:id/answer-question',
+    async (req, reply) => {
+      const entry = sessions.get(req.params.id);
+      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      const ok = entry.session.answerQuestion(
+        req.body.tool_use_id,
+        req.body.answers,
+        req.body.annotations,
+      );
+      if (!ok) {
+        // Answered too late or unknown tool_use_id — not fatal, just log.
+        app.log.warn({ toolUseId: req.body.tool_use_id }, 'answer_question: no pending tool');
+      }
+      return { ok };
     },
   );
 
