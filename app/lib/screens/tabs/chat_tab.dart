@@ -6,10 +6,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../../api/chat_api.dart';
 import '../../api/protocol.dart';
 import '../../api/sessions_api.dart';
+import '../../api/sse_client.dart';
 import '../../i18n/locale_provider.dart';
 import '../../i18n/strings.dart';
 import '../../utils/time_format.dart';
@@ -52,7 +53,9 @@ class ChatTab extends ConsumerStatefulWidget {
 }
 
 class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
-  WebSocketChannel? _channel;
+  ChatApi? _chatApi;
+  SseClient? _sseClient;
+  String? _sessionId;
   final List<IncomingMessage> _messages = [];
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -116,7 +119,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _thoughtForTimer?.cancel();
-    _channel?.sink.close();
+    unawaited(_sseClient?.close() ?? Future.value());
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.close(_sessionId!));
+    }
     _textController.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -126,11 +132,12 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // After app comes back to foreground, force reconnect if socket died.
+      // After app comes back to foreground, force reconnect if SSE stream died.
       if (!_connected && _boundKey != null) {
+        unawaited(_sseClient?.close() ?? Future.value());
         setState(() {
-          _channel?.sink.close();
-          _channel = null;
+          _sseClient = null;
+          _sessionId = null;
           _boundKey = null;
           _error = null;
         });
@@ -148,15 +155,25 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   void _ensureConnected(CurrentSession session) {
     final key = _sessionKey(session);
-    if (_boundKey == key && (_channel != null || session.readOnly)) return;
+    if (_boundKey == key && (_sseClient != null || session.readOnly)) return;
     if (_attemptedKey == key) return; // already tried, don't auto-retry
 
-    _channel?.sink.close();
+    // Tear down any prior SSE/REST session before binding to a new one.
+    final priorSse = _sseClient;
+    final priorApi = _chatApi;
+    final priorId = _sessionId;
+    if (priorSse != null) unawaited(priorSse.close());
+    if (priorId != null && priorApi != null) {
+      unawaited(priorApi.close(priorId));
+    }
+
     _attempting = true;
     _attemptedKey = key;
     setState(() {
       _messages.clear();
-      _channel = null;
+      _sseClient = null;
+      _sessionId = null;
+      _chatApi = null;
       _connected = false;
       _busy = false;
       _error = null;
@@ -175,7 +192,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
 
-    // 只读模式：完全不开 ws，仅通过 HTTP 翻历史。
+    // 只读模式：完全不开传输层，仅通过 HTTP 翻历史。
     if (session.readOnly && session.resumeId != null) {
       _attempting = false;
       _loadHistory(config.httpBase, session.cwd, session.resumeId!);
@@ -184,9 +201,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
     // 普通 resume：先看是否被其他 CLI 进程持有；命中则把决定权交给用户。
     if (session.resumeId != null) {
-      _resumeWithHolderCheck(config.httpBase, config.wsBase, session);
+      _resumeWithHolderCheck(config.httpBase, session);
     } else {
-      _openSessionWebSocket(config.wsBase, session);
+      _openSseSession(config.httpBase, session);
     }
   }
 
@@ -198,7 +215,6 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   ///   - 只读：把 currentSession 切到 readOnly=true 重新走一遍 _ensureConnected。
   Future<void> _resumeWithHolderCheck(
     String httpBase,
-    String wsBase,
     CurrentSession session,
   ) async {
     SessionHolder? holder;
@@ -210,7 +226,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     if (holder == null) {
-      _openSessionWebSocket(wsBase, session);
+      _openSseSession(httpBase, session);
       return;
     }
     // 弹窗
@@ -224,40 +240,58 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
     if (choice == _HolderChoice.takeover) {
-      _openSessionWebSocket(wsBase, session);
+      _openSseSession(httpBase, session);
       return;
     }
     // 取消 / 关闭对话框：什么都不做，停留在空白态。
     _attempting = false;
   }
 
-  void _openSessionWebSocket(String wsBase, CurrentSession session) {
-    // History first — 让用户在 ws 建立期间就能看到历史消息。
-    final conn = ref.read(activeConnectionProvider);
-    if (conn != null && session.resumeId != null) {
-      _loadHistory(conn.httpBase, session.cwd, session.resumeId!);
+  Future<void> _openSseSession(String httpBase, CurrentSession session) async {
+    // History first — 让用户在传输建立期间就能看到历史消息。
+    if (session.resumeId != null) {
+      _loadHistory(httpBase, session.cwd, session.resumeId!);
     }
 
-    final uri = Uri.parse('$wsBase/ws/session');
-    try {
-      _channel = WebSocketChannel.connect(uri);
-    } catch (e) {
-      _attempting = false;
-      setState(() => _error = '$e');
-      return;
-    }
-    _channel!.stream.listen(_onData, onError: _onError, onDone: _onDone);
-
+    final api = ChatApi(httpBase);
+    _chatApi = api;
     final model = ref.read(currentModelProvider);
     final permMode = ref.read(permissionModeProvider);
-    final initMsg = {
-      'type': 'init',
-      'cwd': session.cwd,
-      'permission_mode': permMode.wire,
-      'model': model.id,
-      if (session.resumeId != null) 'resume': session.resumeId,
-    };
-    _channel!.sink.add(jsonEncode(initMsg));
+
+    ChatStartResponse start;
+    try {
+      start = await api.start(
+        cwd: session.cwd,
+        permissionMode: permMode.wire,
+        resume: session.resumeId,
+        model: model.id,
+      );
+    } catch (e) {
+      _attempting = false;
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _chatApi = null;
+      });
+      return;
+    }
+    if (!mounted) {
+      // Tab disposed between start() request and response — clean up.
+      unawaited(api.close(start.sessionId));
+      return;
+    }
+    setState(() {
+      _sessionId = start.sessionId;
+      _connected = true;
+      _attempting = false;
+      _error = null;
+    });
+
+    final sseUrl = Uri.parse('$httpBase/chat/${start.sessionId}/events');
+    final sse = SseClient(url: sseUrl);
+    _sseClient = sse;
+    sse.events.listen(_onSseEvent);
+    unawaited(sse.connect());
   }
 
   Future<_HolderChoice?> _showHolderDialog(SessionHolder holder) async {
@@ -328,15 +362,15 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   void _switchModel(ModelOption m) {
     ref.read(currentModelProvider.notifier).state = m;
-    if (_channel != null && _connected) {
-      _channel!.sink.add(jsonEncode({'type': 'set_model', 'model': m.id}));
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.setModel(_sessionId!, m.id));
     }
   }
 
   void _switchPermissionMode(CcPermissionMode m) {
     ref.read(permissionModeProvider.notifier).set(m);
-    if (_channel != null && _connected) {
-      _channel!.sink.add(jsonEncode({'type': 'set_permission_mode', 'mode': m.wire}));
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.setPermissionMode(_sessionId!, m.wire));
     }
   }
 
@@ -460,9 +494,17 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _manualReconnect() {
+    final priorSse = _sseClient;
+    final priorApi = _chatApi;
+    final priorId = _sessionId;
+    if (priorSse != null) unawaited(priorSse.close());
+    if (priorId != null && priorApi != null) {
+      unawaited(priorApi.close(priorId));
+    }
     setState(() {
-      _channel?.sink.close();
-      _channel = null;
+      _sseClient = null;
+      _sessionId = null;
+      _chatApi = null;
       _boundKey = null;
       _attemptedKey = null;
       _attempting = false;
@@ -470,9 +512,45 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     });
   }
 
-  void _onData(dynamic raw) {
-    if (raw is! String) return;
-    final json = jsonDecode(raw) as Map<String, dynamic>;
+  void _onSseEvent(SseEvent ev) {
+    // Internal transport signals come through with a `__` prefix; surface them
+    // as connection-level state changes rather than wire messages.
+    if (ev.type.startsWith('__')) {
+      if (ev.type == '__gap') {
+        if (!mounted) return;
+        setState(() {
+          _error = 'event gap, reloading…';
+          _connected = false;
+        });
+      } else if (ev.type == '__client_error') {
+        // Transient — the SSE client will retry. Surface the latest error.
+        if (!mounted) return;
+        setState(() {
+          _error = ev.data;
+          _connected = false;
+        });
+      }
+      return;
+    }
+    // Heartbeats etc. emit blank data; skip safely.
+    if (ev.data.isEmpty) return;
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(ev.data) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    // First wire message after reconnect (re)confirms the live stream.
+    if (!_connected && mounted) {
+      setState(() {
+        _connected = true;
+        _error = null;
+      });
+    }
+    _handleWireMessage(json);
+  }
+
+  void _handleWireMessage(Map<String, dynamic> json) {
     final msg = IncomingMessage.fromJson(json);
     setState(() {
       if (msg is SessionReady) {
@@ -586,25 +664,6 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     _scrollToEnd();
   }
 
-  void _onError(Object e) {
-    _attempting = false;
-    setState(() {
-      _error = e.toString();
-      _connected = false;
-      _channel = null;
-    });
-  }
-
-  void _onDone() {
-    _attempting = false;
-    setState(() {
-      _connected = false;
-      _busy = false;
-      _busyStartedAt = null;
-      _channel = null;
-    });
-  }
-
   /// 滚动到底部。
   /// - [force] = true：无论 _stickToBottom 是什么都强制滚（用于浮动按钮 / 提交消息后）
   /// - [force] = false（默认）：仅在当前已经"贴底"时滚（用于流式 delta 自动跟随）
@@ -634,7 +693,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     _sendNow(text);
   }
 
-  /// 实际把一条 user_message 发到 ws，并设置 busy / spinner 状态。
+  /// 实际把一条 user_message 发到 server，并设置 busy / spinner 状态。
   /// 已经假设 !_busy。调用者应自己处理排队。
   void _sendNow(String text) {
     setState(() {
@@ -646,7 +705,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _thoughtSeconds = null;
       _thoughtForTimer?.cancel();
     });
-    _channel?.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
+    if (_sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.sendMessage(_sessionId!, text));
+    }
     _scrollToEnd(force: true);
   }
 
@@ -664,7 +725,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _interrupt() {
-    if (_busy) _channel?.sink.add(jsonEncode({'type': 'interrupt'}));
+    if (_busy && _sessionId != null && _chatApi != null) {
+      unawaited(_chatApi!.interrupt(_sessionId!));
+    }
   }
 
   @override

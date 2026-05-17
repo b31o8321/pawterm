@@ -12,7 +12,6 @@ import { registerChatRest } from './chat-rest.js';
 import { settings, addProject, removeProject, isPathAllowed, ProjectExistsError } from './config.js';
 import { buildLoggerOptions } from './logger.js';
 import { registerSessionsApi } from './sessions-api.js';
-import { handleChatSocket } from './ws-chat.js';
 import { handleShellSocket } from './ws-shell.js';
 
 const VERSION = '0.2.0';
@@ -221,13 +220,8 @@ async function main(): Promise<void> {
   // REST: sessions
   await registerSessionsApi(app);
 
-  // REST + SSE: chat (new transport; runs alongside ws-chat during migration)
+  // REST + SSE: chat
   await registerChatRest(app);
-
-  // WebSocket: chat
-  app.get('/ws/session', { websocket: true }, (socket, req) => {
-    handleChatSocket(socket, req);
-  });
 
   // WebSocket: shell
   app.get('/ws/shell', { websocket: true }, (socket, req) => {
