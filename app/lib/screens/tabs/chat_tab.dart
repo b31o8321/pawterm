@@ -180,6 +180,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   void _ensureConnected(CurrentSession session) {
     final key = _sessionKey(session);
     if (_boundKey == key && (_sseClient != null || session.readOnly)) return;
+    if (_attempting) return; // connection attempt already in-flight
     if (_attemptedKey == key) return; // already tried, don't auto-retry
 
     // Tear down any prior SSE/REST session before binding to a new one.
@@ -950,10 +951,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           )
         else if (ref.watch(todoListProvider).isNotEmpty)
           // 非 streaming 也要看到任务进度条 —— 单独占一行
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 12, 4),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 4, 12, 4),
             child: Row(
-              children: const [Spacer(), TodoChip()],
+              children: [Spacer(), TodoChip()],
             ),
           ),
         if (_pending.isNotEmpty)
