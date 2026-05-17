@@ -1109,8 +1109,8 @@ class _SendOrStopButtonState extends State<_SendOrStopButton> {
     final Color bg;
     final Color fg;
     if (!widget.canSend && !widget.busy) {
-      bg = dark ? t.borderSubt : const Color(0xFFD0D5DD);
-      fg = dark ? t.textDim : Colors.white;
+      bg = dark ? t.borderSubt : const Color(0xFFE4E7EC);
+      fg = dark ? t.textDim : const Color(0xFF98A2B3);
     } else {
       bg = dark ? t.text : const Color(0xFF101828);
       fg = dark ? const Color(0xFF0B1210) : Colors.white;
@@ -1133,13 +1133,15 @@ class _SendOrStopButtonState extends State<_SendOrStopButton> {
           decoration: BoxDecoration(
             color: bg,
             shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.15),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
-              ),
-            ],
+            boxShadow: dark
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.15),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
           ),
           alignment: Alignment.center,
           child: widget.busy
