@@ -394,6 +394,7 @@ class _JsonBlock extends StatelessWidget {
     } catch (_) {
       text = value.toString();
     }
+    final truncated = text.length > 4000 ? '${text.substring(0, 4000)}\n…(truncated)' : text;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(8),
@@ -403,7 +404,7 @@ class _JsonBlock extends StatelessWidget {
         border: Border.all(color: t.borderSubt, width: 0.5),
       ),
       child: SelectableText(
-        text,
+        truncated,
         style: TextStyle(
           fontFamily: 'monospace',
           fontSize: 11,
