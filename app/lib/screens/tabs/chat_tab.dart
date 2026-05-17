@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -1117,7 +1118,10 @@ class _SendOrStopButtonState extends State<_SendOrStopButton> {
     }
 
     return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
+      onTapDown: (_) {
+        HapticFeedback.lightImpact();
+        setState(() => _pressed = true);
+      },
       onTapUp: (_) => setState(() => _pressed = false),
       onTapCancel: () => setState(() => _pressed = false),
       onTap: widget.busy
@@ -1127,33 +1131,39 @@ class _SendOrStopButtonState extends State<_SendOrStopButton> {
         scale: _pressed ? 0.96 : 1.0,
         duration: const Duration(milliseconds: 100),
         curve: Curves.easeOut,
-        child: Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: bg,
-            shape: BoxShape.circle,
-            boxShadow: dark
-                ? null
-                : [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.15),
-                      blurRadius: 6,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Center(
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: bg,
+                shape: BoxShape.circle,
+                boxShadow: dark
+                    ? null
+                    : [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.15),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+              ),
+              alignment: Alignment.center,
+              child: widget.busy
+                  ? Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: fg,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    )
+                  : Icon(Icons.arrow_upward_rounded, size: 18, color: fg),
+            ),
           ),
-          alignment: Alignment.center,
-          child: widget.busy
-              ? Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: fg,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                )
-              : Icon(Icons.arrow_upward_rounded, size: 18, color: fg),
         ),
       ),
     );
