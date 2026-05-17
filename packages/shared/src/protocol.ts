@@ -7,7 +7,9 @@
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 
-// ============== Chat WebSocket: /ws/session ==============
+// ============== Chat WebSocket: /ws/session (web admin only) ==============
+// The Flutter app has migrated to REST + SSE. This union type is kept only for
+// the web admin's wsChat.ts until that client is also migrated.
 
 export type ChatClientMessage =
   | { type: 'init'; cwd: string; permission_mode?: PermissionMode; resume?: string; model?: string }
@@ -47,6 +49,15 @@ export type ToolResultContent =
   | string
   | Array<{ type: 'text'; text: string } | { type: string; [k: string]: unknown }>
   | null;
+
+// ============== Chat REST: POST /chat/<id>/answer-question ==============
+
+/** POST /chat/<id>/answer-question 请求 body */
+export interface AnswerQuestionRequest {
+  tool_use_id: string;
+  answers: Record<string, string>;
+  annotations?: Record<string, { preview?: string; notes?: string }>;
+}
 
 // ============== Shell WebSocket: /ws/shell ==============
 
