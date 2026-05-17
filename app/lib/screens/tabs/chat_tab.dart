@@ -1077,11 +1077,11 @@ class _Composer extends ConsumerWidget {
   }
 }
 
-/// 输入框右侧的 44×44 圆角方块按钮。
-/// - busy=false → 发送箭头，accent 色
-/// - busy=true  → 停止方块，红色
-/// - 不可用    → 灰
-class _SendOrStopButton extends StatelessWidget {
+/// 输入框右侧的 40×40 圆形按钮（黑白主题，对照 cxclaw）。
+/// - busy=false → 发送上箭头
+/// - busy=true  → 停止方块（同一种背景，仅图标变）
+/// - 不可用    → 浅灰
+class _SendOrStopButton extends StatefulWidget {
   final bool busy;
   final bool canSend;
   final VoidCallback onSubmit;
@@ -1094,27 +1094,64 @@ class _SendOrStopButton extends StatelessWidget {
   });
 
   @override
+  State<_SendOrStopButton> createState() => _SendOrStopButtonState();
+}
+
+class _SendOrStopButtonState extends State<_SendOrStopButton> {
+  bool _pressed = false;
+
+  @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
-    final bg = busy
-        ? t.error
-        : (canSend ? t.accent : t.surfaceHi);
-    final fg = (busy || canSend) ? Colors.white : t.textDim;
-    final radius = BorderRadius.circular(12);
-    return Material(
-      color: bg,
-      borderRadius: radius,
-      child: InkWell(
-        borderRadius: radius,
-        onTap: busy ? onStop : (canSend ? onSubmit : null),
-        child: SizedBox(
-          width: 44,
-          height: 44,
-          child: Icon(
-            busy ? Icons.stop_rounded : Icons.arrow_upward_rounded,
-            size: 22,
-            color: fg,
+    final dark = Theme.of(context).brightness == Brightness.dark;
+
+    // 主题色：亮模式黑底，暗模式近白底。按下时 / 不可用时颜色降级。
+    final Color bg;
+    final Color fg;
+    if (!widget.canSend && !widget.busy) {
+      bg = dark ? t.borderSubt : const Color(0xFFD0D5DD);
+      fg = dark ? t.textDim : Colors.white;
+    } else {
+      bg = dark ? t.text : const Color(0xFF101828);
+      fg = dark ? const Color(0xFF0B1210) : Colors.white;
+    }
+
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTap: widget.busy
+          ? widget.onStop
+          : (widget.canSend ? widget.onSubmit : null),
+      child: AnimatedScale(
+        scale: _pressed ? 0.96 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: bg,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.15),
+                blurRadius: 6,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
+          alignment: Alignment.center,
+          child: widget.busy
+              ? Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    color: fg,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                )
+              : Icon(Icons.arrow_upward_rounded, size: 18, color: fg),
         ),
       ),
     );
