@@ -147,6 +147,20 @@ function extractContent(content: unknown): ContentBlock[] {
     .filter((b): b is ContentBlock => b !== null);
 }
 
+/**
+ * JSON.stringify with circular-reference safety. Falls back to String(v)
+ * rather than throwing — protects the wire pipeline from malformed tool
+ * outputs (e.g. graph data, debug dumps with parent pointers).
+ */
+function safeStringify(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    // Fallback for circular refs or other non-serializable values.
+    return String(v);
+  }
+}
+
 function normalizeToolResultContent(content: unknown): any {
   if (content == null) return null;
   if (typeof content === 'string') return content;
@@ -158,15 +172,15 @@ function normalizeToolResultContent(content: unknown): any {
       }
       if (item && typeof item === 'object' && 'text' in item) {
         const t = item.text;
-        const text = typeof t === 'string' ? t : JSON.stringify(t, null, 2);
+        const text = typeof t === 'string' ? t : safeStringify(t);
         return { type: 'text', text };
       }
       // Anything else (including raw JSON objects from MCP tools): stringify whole item.
-      return { type: 'text', text: JSON.stringify(item, null, 2) };
+      return { type: 'text', text: safeStringify(item) };
     });
   }
   if (typeof content === 'object') {
-    return JSON.stringify(content, null, 2);
+    return safeStringify(content);
   }
   return String(content);
 }

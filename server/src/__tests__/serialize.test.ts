@@ -52,4 +52,21 @@ describe('normalizeToolResultContent (via messageToWire user msg)', () => {
   it('handles null content', () => {
     expect(wireToolResultContent(null)).toBeNull();
   });
+
+  it('safely handles circular references in object items (does not throw)', () => {
+    const circular: any = { name: 'root', value: 42 };
+    circular.self = circular;
+    // Should NOT throw; fallback to String(v) which yields '[object Object]'
+    // (the regression we accepted vs. crashing the whole wire pipeline).
+    expect(() => wireToolResultContent([circular])).not.toThrow();
+    const result = wireToolResultContent([circular]);
+    expect(result).toHaveLength(1);
+    expect(result[0].type).toBe('text');
+    // Fallback path → String(circular) → "[object Object]"
+    expect(typeof result[0].text).toBe('string');
+  });
+
+  it('handles undefined content the same as null', () => {
+    expect(wireToolResultContent(undefined)).toBeNull();
+  });
 });
