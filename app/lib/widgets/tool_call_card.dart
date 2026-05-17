@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../api/protocol.dart';
@@ -273,7 +275,10 @@ class _ToolCallCardState extends State<ToolCallCard> {
       case 'TodoWrite':
         return _TodoList(todos: input['todos']);
       default:
-        return _KeyValueList(map: input);
+        final hasNested = input.values.any((v) => v is Map || v is List);
+        return hasNested
+            ? _JsonBlock(value: input)
+            : _KeyValueList(map: input);
     }
   }
 }
@@ -368,6 +373,44 @@ class _KeyValueList extends StatelessWidget {
           ),
         );
       }).toList(),
+    );
+  }
+}
+
+/// Pretty-JSON 代码块。用于嵌套结构（Map/List）的 tool input / 通用对象展示。
+/// 与 _outputBody 相同的视觉规格（黑底 + monospace + textMuted）。
+class _JsonBlock extends StatelessWidget {
+  final Object? value;
+  const _JsonBlock({required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    const enc = JsonEncoder.withIndent('  ');
+    // jsonEncode 对非 JSON-safe 值（如 DateTime）会抛；保护一下
+    String text;
+    try {
+      text = enc.convert(value);
+    } catch (_) {
+      text = value.toString();
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: t.bg,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: t.borderSubt, width: 0.5),
+      ),
+      child: SelectableText(
+        text,
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: t.textMuted,
+          height: 1.5,
+        ),
+      ),
     );
   }
 }
