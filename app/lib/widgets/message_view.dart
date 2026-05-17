@@ -173,16 +173,21 @@ class MessageView extends StatelessWidget {
     }
 
     if (block is ToolUseBlock) {
-      if (block.name.endsWith('AskUserQuestion') && onAnswerQuestion != null) {
+      final result = toolResults?[block.id];
+      // 仅在工具调用 pending 或成功时渲染交互 Widget；
+      // error result 说明调用失败（工具不存在 / 超时），fallback 到 ToolCallCard。
+      if (block.name.endsWith('AskUserQuestion') &&
+          onAnswerQuestion != null &&
+          result?.isError != true) {
         return AskUserQuestionWidget(
           toolUse: block,
-          answeredResult: toolResults?[block.id],
+          answeredResult: result,
           onSubmit: onAnswerQuestion!,
         );
       }
       return ToolCallCard(
         toolUse: block,
-        result: toolResults?[block.id],
+        result: result,
       );
     }
 
