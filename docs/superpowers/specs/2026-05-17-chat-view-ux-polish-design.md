@@ -6,12 +6,13 @@
 
 ## 背景与目标
 
-Claude Companion 的聊天主视图（`ChatTab`）当前可用但有若干长期累积的小痛点。本 spec 把四项独立但主题相关的改进打包成一次提交：
+Claude Companion 的聊天主视图（`ChatTab`）当前可用但有若干长期累积的小痛点。本 spec 把五项主题相关的改进打包成一次提交：
 
 1. 发送 / 停止按钮换成黑白风（参考 `shulex-smart-service/src/pages/cxClaw`）
 2. 输入框支持附件上传（图片 / PDF / 任意文件）
-3. tool_result 返回的结构化对象当前被渲染成字面量 `[object Object]`，需修复
+3. tool 输出 / 输入的结构化对象渲染修复（tool_result `[object Object]` + tool_use input pretty JSON）
 4. 支持 cc 同款 `AskUserQuestion` 多选/单选交互渲染
+5. **Chat 传输层从 WebSocket 切换到 SSE + REST**（终端 tab 仍保留 WS）
 
 主题统一为"Chat 视图体验完善"，每一项都能独立验收；放在同一份 spec 里是因为代码改动有局部交叉（输入框、协议、tool 渲染），合并一次实现+审查比拆四次更经济。
 
@@ -22,6 +23,8 @@ Claude Companion 的聊天主视图（`ChatTab`）当前可用但有若干长期
 - 输入框语音输入
 - AskUserQuestion 的 HTML preview（仅支持 markdown preview）
 - 附件目录的自动清理
+- WS 终端 tab 改造（shell tab 仍保留 WebSocket，因双向高频按键 + OSC 序列）
+- SSE 事件缓冲跨进程 / 跨节点（单进程 in-memory ring buffer 就够 Spec A）
 
 ## 现状速览
 
@@ -459,20 +462,143 @@ type ChatClientMessage = ... | ClientAnswerQuestionMessage;
 - 撤回上一答：不支持。一答即终态。
 - 用户提交后即冻结，即便 server 因网络问题没收到 —— **超时后 server 会自动 reject，Claude 看到 is_error 重试或继续**，UI 上的"已答"状态是 best-effort 显示。
 
+### 5. Chat 传输层：WS → SSE + REST
+
+#### 5.1 为什么换
+
+Chat 的流量结构高度非对称：server → client 是高频（每 ms 一个 token delta），client → server 是低频（每次操作一条）。WebSocket 适合"双向都高频"，SSE + REST 才是非对称流的正解。Anthropic API 自家就是 SSE。
+
+切换还能白嫖：
+
+- **`Last-Event-ID` 重连恢复** —— SSE 协议原生有断点续传，移动网络抖动后能无缝接回流式输出
+- **EventSource 自动重试**，省掉 `ws-chat.ts` 现有那一堆 `_attemptedKey / didChangeAppLifecycleState` 自己写的重连逻辑
+- **可 curl 调试**：`curl --no-buffer http://.../chat/<id>/events`
+- **HTTP/2 多路复用** 复用 TCP 连接
+- 是 Spec B（多会话 + 后台）的基础设施：每会话一条 SSE，Last-Event-ID 解决"切回会话看中间事件"的需求
+
+#### 5.2 API 设计
+
+**REST 端点**（all under `/chat`）：
+
+| 方法 | 路径 | 请求 body | 响应 |
+|---|---|---|---|
+| POST | `/chat/start` | `{ cwd, permission_mode?, resume?, model? }` | `{ session_id, cwd, permission_mode, resumed }` |
+| POST | `/chat/<id>/message` | `{ text }` | 200 OK (空) |
+| POST | `/chat/<id>/answer-question` | `{ tool_use_id, answers, annotations? }` | 200 OK |
+| POST | `/chat/<id>/interrupt` | (空) | 200 OK |
+| POST | `/chat/<id>/set-model` | `{ model }` | 200 OK |
+| POST | `/chat/<id>/set-permission-mode` | `{ mode }` | 200 OK |
+| DELETE | `/chat/<id>` | (空) | 200 OK (主动关闭) |
+
+**SSE 端点**：
+- `GET /chat/<id>/events` (`Accept: text/event-stream`)
+  - 每个事件带 `id: <seq>` (递增整数) 和 `event: <type>` 字段
+  - 重连时 client 发 `Last-Event-ID: <seq>` 头 → server 从 ring buffer 重放 `seq+1` 之后
+  - keep-alive：server 每 15s 发一个 SSE comment (`: heartbeat\n\n`)，防代理 idle 超时
+
+**事件类型**（基本 map 自现有 `ChatServerMessage`，仅命名调整）：
+
+`assistant` / `user` / `system` / `result` / `stream_block_start` / `stream_delta` / `stream_block_stop` / `compact_boundary` / `error`
+
+去掉：
+- `session_ready` —— 改由 `POST /chat/start` 的 response 返回
+- `pong` —— HTTP / SSE 自有 keep-alive 机制
+
+#### 5.3 Ring buffer
+
+每 session 一个 in-memory ring buffer：
+
+- 容量：**1000 events**（约一分钟高频流式 token 量级，覆盖大多数 cellular 抖动）
+- 数据结构：固定大小数组 + head/tail 指针 + 全局递增 `seqId`
+- 满 → drop 最老
+- 客户端断线 > 1000 events 后重连：返回 `412 Precondition Failed`（gap 不可恢复），client 走"显示 banner + 刷新历史 + 重开 SSE"降级路径
+- 内存预算：平均 0.5KB/event × 1000 = ~500KB/session，可接受
+
+#### 5.4 Session 生命周期
+
+```
+POST /chat/start
+  → 创建 ChatSession + EventBuffer
+  → 注册到 sessionRegistry: Map<string, { session, buffer, graceTimer? }>
+  → 返回 session_id
+
+GET /chat/<id>/events
+  → 取消 graceTimer（若有）
+  → 接管 streamResponses 输出 → 写入 buffer + 写入 SSE
+  → 若有 Last-Event-ID 头：先 replay buffer 中 > lastId 的事件
+  → 客户端断 → 启 graceTimer(30s)
+
+graceTimer 触发 / DELETE /chat/<id>:
+  → session.close() + askRegistry.rejectAll
+  → registry.delete
+```
+
+Spec A 阶段 grace = 30s（够手机短暂切后台）。Spec B 会延长到分钟级。
+
+#### 5.5 Client SSE 实现
+
+新建 `app/lib/api/sse_client.dart`，**自己写约 80 行**（避免引入 stale 第三方包，pub 上的 `eventsource` 长期未更新）：
+
+- 用 `http.Client.send()` 发起请求带 `Accept: text/event-stream`
+- 解析 SSE wire format（`id:` / `event:` / `data:` / 空行结束一个 event；前缀 `:` 是 comment 忽略）
+- 维护 `_lastEventId`，重连时 `headers['Last-Event-ID'] = _lastEventId`
+- 暴露 `Stream<SseEvent>` 让 chat_tab 监听
+- 错误处理：连接 drop 自动重试，指数退避 1s → 2s → 4s → cap 30s
+- 显式 `close()` 停止流
+
+#### 5.6 协议层重组
+
+`packages/shared/src/protocol.ts` 调整：
+
+- **删除** `ChatClientMessage` union（不再有 client→server WS 消息）
+- **保留并重命名** `ChatServerMessage` → `ChatEvent`（语义更准）
+- **新增** REST 请求/响应类型：
+  - `ChatStartRequest`, `ChatStartResponse`
+  - `SendMessageRequest`
+  - `AnswerQuestionRequest`
+  - `SetModelRequest`, `SetPermissionModeRequest`
+- 不变：`ContentBlock`, `ToolResultContent`, `KNOWN_MODELS`, `PermissionMode`
+
+#### 5.7 Shell tab 保持不变
+
+`ws-shell.ts` / `shell_tab.dart` 完全不动。终端 tab 仍然走 WebSocketChannel —— 双向高频按键、resize、OSC 序列这些场景 WS 是正确选择。
+
+#### 5.8 实施顺序（影响 §4 protocol 描述）
+
+由于 SSE 迁移在 §4 AskUserQuestion 之前完成，**§4.5 协议扩展原本"加 `ChatClientMessage` 一支"的描述改为"`POST /chat/<id>/answer-question` REST 端点"**。Server 端 §4.2 的 `answer_question` WS case 改为 REST handler。
+
+#### 5.9 已知妥协 / YAGNI
+
+- Ring buffer 不持久化（server 重启 = 所有 session 失效，client 走 reload 走起）
+- Grace period 短（30s）—— "长时间后台运行"是 Spec B 的范畴
+- 无跨进程 session 路由（单进程 server，trusted LAN 假设）
+- session_id 简单随机串，无独立权限校验（与现有 `isPathAllowed(cwd)` 同等信任级别）
+- 暂时**保留** `ws-chat.ts` 一个 commit 周期（server 双栈），客户端切完后再删 —— 避免中间 commit 上 chat 完全坏掉
+
 ## 数据流 / 接口契约总览
 
-### 协议变更
+### 协议变更（含 §5 SSE 迁移后）
 
-| 方向 | 类型 | 改动 |
+| 方向 | 通道 | 改动 |
 |---|---|---|
-| C→S | `answer_question` | **新增** |
-| C→S | 其余 | 无变化 |
-| S→C | 全部 | 无变化（`tool_use` / `tool_result` 复用现有通道） |
+| WS `/ws/session` | client / server 双向 | **整体废弃**（Spec A 内保留一个 commit 周期，客户端切完后删） |
+| WS `/ws/shell` | 终端 | **不变** |
+| REST `/chat/*` | client → server | **新建**（start / message / answer-question / interrupt / set-model / set-permission-mode / DELETE） |
+| SSE `/chat/<id>/events` | server → client | **新建**（含 Last-Event-ID 续传） |
+| REST `/upload` | client → server | **新增**（§2） |
 
-### HTTP 新端点
+### HTTP / SSE 端点速览
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
+| POST | `/chat/start` | 起会话，返回 session_id |
+| POST | `/chat/<id>/message` | 发用户文本消息 |
+| POST | `/chat/<id>/answer-question` | 回答 AskUserQuestion（替代 §4 原 WS 设计） |
+| POST | `/chat/<id>/interrupt` | 打断生成 |
+| POST | `/chat/<id>/set-model` | 切模型 |
+| POST | `/chat/<id>/set-permission-mode` | 切权限模式 |
+| DELETE | `/chat/<id>` | 显式关闭会话 |
+| GET | `/chat/<id>/events` | SSE 事件流，支持 Last-Event-ID 续传 |
 | POST | `/upload?cwd=<path>` | multipart 上传附件，返回 `{ path, size }` |
 
 ### Dart 新组件 / 文件
@@ -530,15 +656,18 @@ type ChatClientMessage = ... | ClientAnswerQuestionMessage;
 |---|---|---|
 | §1 按钮黑白风 | ~50 Flutter | 30 min |
 | §2 附件上传 | ~250 Flutter + 80 TS | 4-6 hr |
-| §3 tool JSON 修复 | ~15 TS | 15 min |
+| §3a/b tool JSON 修复 | ~15 TS + ~50 Flutter | 45 min |
 | §4 AskUserQuestion | ~400 Flutter + 200 TS | 6-8 hr |
-| **合计** | **~600 Flutter + ~300 TS** | **~2 工作日** |
+| §5 Chat SSE 迁移 | ~300 TS + ~150 Flutter | 6-8 hr |
+| **合计** | **~850 Flutter + ~600 TS** | **~3 工作日** |
 
 ## 验收
 
 - [ ] 亮/暗模式下发送 / 停止按钮均匀显示，触感符合规格
 - [ ] 上传功能 4 种文件类型可用，进度可见，发送时自动注入路径
 - [ ] 任意结构化 tool_result 显示为美化 JSON，不再出现 `[object Object]`
+- [ ] 嵌套结构的 tool_use input（如自定义 MCP 工具的复杂参数）显示为美化 JSON 代码块
 - [ ] Claude 主动调用 AskUserQuestion 时弹出交互表单，单选 tap 即提交，多选/多问走提交按钮，preview tap 弹底部 sheet，已答态显示用户选择
+- [ ] Chat 切到 SSE + REST：流式输出正常、断线 30s 内重连能续传中间事件、终端 tab 不受影响
 - [ ] 所有改动通过 `flutter analyze` 和 `pnpm -F server build` 无 error
-- [ ] 实测一遍完整使用流：开会话 → 上传图 → Claude 答 → 触发 AskUserQuestion → 选 → Claude 继续
+- [ ] 实测一遍完整使用流：开会话 → 上传图 → Claude 答 → 触发 AskUserQuestion → 选 → Claude 继续 → 中途切后台再回前台 → 看流没断

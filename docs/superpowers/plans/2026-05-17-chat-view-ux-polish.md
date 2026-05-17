@@ -2,34 +2,39 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 [Spec A](../specs/2026-05-17-chat-view-ux-polish-design.md) 的四项 chat 视图改进落地：按钮黑白风、附件上传、tool 输出对象 JSON 修复、AskUserQuestion 交互渲染。
+**Goal:** 把 [Spec A](../specs/2026-05-17-chat-view-ux-polish-design.md) 的五项 chat 视图改进落地：按钮黑白风、附件上传、tool 输出/输入对象 JSON 修复、AskUserQuestion 交互渲染、Chat 传输层换 SSE+REST（终端 WS 不变）。
 
-**Architecture:** Server 侧在现有 Fastify + claude-agent-sdk 上加 `/upload` 端点和一个自定义 MCP server (`ask-user-question`)；Client 侧扩展 `_Composer` 并新增 `AskUserQuestionWidget`；WS 协议新增 `answer_question` 一种 client→server 消息。引入 vitest 给 server 端纯函数加最小测试。
+**Architecture:** Server 侧在现有 Fastify + claude-agent-sdk 上做三件事：(1) 加 `/upload` 端点；(2) 把 chat 从 WS 改成 REST + SSE（含 Last-Event-ID 续传 ring buffer）；(3) 加一个自定义 MCP server (`ask-user-question`) 把 tool handler 挂起+等客户端回答。Client 侧扩展 `_Composer` + 新增 `AskUserQuestionWidget` + 自己写一个 ~80 行 SSE 客户端。引入 vitest 给 server 纯函数加最小测试。
 
-**Tech Stack:** Flutter (Dart), TypeScript + Fastify 5, `@anthropic-ai/claude-agent-sdk` 0.2.141, vitest（新引入）, `@fastify/multipart`（新引入）, `file_picker` Flutter pub 包（新引入）。
+**Tech Stack:** Flutter (Dart), TypeScript + Fastify 5, `@anthropic-ai/claude-agent-sdk` 0.2.141, vitest（新引入）, `@fastify/multipart`（新引入）, `file_picker` Flutter pub 包（新引入）。SSE 客户端自实现，不引第三方包。
 
 ---
 
 ## 文件结构
 
 **新建：**
+- `server/src/event-buffer.ts` — SSE 事件 ring buffer 类（per session 1000-event 缓冲 + Last-Event-ID 续传支持）
+- `server/src/chat-rest.ts` — Chat REST 路由 + SSE 端点（替代 ws-chat.ts）
 - `server/src/upload.ts` — `POST /upload` Fastify route handler
 - `server/src/ask-user-tool.ts` — `AskUserQuestionRegistry` 类 + `makeAskUserMcpServer()` 工厂
-- `server/src/__tests__/serialize.test.ts` — `normalizeToolResultContent` 的快照测试
+- `server/src/__tests__/serialize.test.ts` — `normalizeToolResultContent` 快照测试
+- `server/src/__tests__/event-buffer.test.ts` — `EventBuffer` 单元测试
 - `server/src/__tests__/ask-user-tool.test.ts` — `AskUserQuestionRegistry` 单元测试
 - `server/vitest.config.ts` — vitest 配置
 - `app/lib/api/upload_api.dart` — Flutter 上传 HTTP 客户端
+- `app/lib/api/sse_client.dart` — 轻量 SSE 客户端（~80 行，自实现）
+- `app/lib/api/chat_api.dart` — Chat REST 客户端（start/message/interrupt/setModel/setPermissionMode/answerQuestion/close）
 - `app/lib/widgets/ask_user_question.dart` — `AskUserQuestionWidget`（live + answered 双态）
 
 **修改：**
 - `server/package.json` — 加 `vitest` (dev) + `@fastify/multipart` + `zod` 显式依赖
 - `server/src/serialize.ts` — 重写 `normalizeToolResultContent`
-- `server/src/index.ts` — 注册 multipart 插件 + `/upload` 路由
-- `server/src/session-manager.ts` — 注入 askRegistry + mcpServers + `answerQuestion()` 方法
-- `server/src/ws-chat.ts` — 每 socket 一个 registry + `answer_question` case + 断线 cleanup
-- `packages/shared/src/protocol.ts` — `ChatClientMessage` 加 `answer_question` 一支
+- `server/src/index.ts` — 注册 multipart + `/upload` + `chat-rest`；保留 `ws-chat`（Task 2b 暂时双栈）；Task 2c 末尾移除 ws-chat
+- `server/src/session-manager.ts` — 注入 askRegistry + mcpServers + `answerQuestion()` 方法（transport-agnostic）
+- `server/src/ws-chat.ts` — **Task 2c 删除**（Spec A 之前先保留双栈一次 commit）
+- `packages/shared/src/protocol.ts` — 删除 `ChatClientMessage` union；新增 REST 请求/响应类型；保留 ChatEvent 类型；新增 `AnswerQuestionRequest` 等
 - `app/pubspec.yaml` — 加 `file_picker: ^8.0.0` 依赖
-- `app/lib/screens/tabs/chat_tab.dart` — `_SendOrStopButton` 改造 + `_Composer` 加附件 + 加 `_sendAnswerQuestion()`
+- `app/lib/screens/tabs/chat_tab.dart` — 改造 `_ChatTabState`（去 WS，用 SseClient + ChatApi）+ `_SendOrStopButton` 黑白风 + `_Composer` 加附件
 - `app/lib/widgets/message_view.dart` — `ToolUseBlock` 分发新增 AskUserQuestion 分支
 - `app/lib/widgets/tool_call_card.dart` — 新增 `_JsonBlock` + `_renderBody` default 分支条件切换
 
@@ -510,6 +515,908 @@ git commit -m "style(composer): black-white send/stop button (cxclaw-style)"
 
 ---
 
+## Task 2b: §5 Server — Chat REST + SSE 迁移（与 WS 双栈）
+
+**目标**：把 chat 协议从 WS 改为 REST + SSE，含 Last-Event-ID 续传。**保留 `ws-chat.ts` 一个 commit 周期**，让 client 迁移期间 main 不挂。
+
+**Files:**
+- Create: `server/src/event-buffer.ts`
+- Create: `server/src/chat-rest.ts`
+- Create: `server/src/__tests__/event-buffer.test.ts`
+- Modify: `server/src/index.ts`（注册 chat-rest，保留 ws-chat）
+
+### Step 2b.1: 写 EventBuffer 测试
+
+- [ ] Create `server/src/__tests__/event-buffer.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { EventBuffer } from '../event-buffer.js';
+
+describe('EventBuffer', () => {
+  it('assigns monotonically increasing IDs', () => {
+    const b = new EventBuffer(10);
+    expect(b.push('a', {}).id).toBe(1);
+    expect(b.push('b', {}).id).toBe(2);
+    expect(b.push('c', {}).id).toBe(3);
+  });
+
+  it('drops oldest when full', () => {
+    const b = new EventBuffer(3);
+    b.push('a', {}); // id=1
+    b.push('b', {}); // id=2
+    b.push('c', {}); // id=3
+    b.push('d', {}); // id=4, drops id=1
+    expect(b.oldestId).toBe(2);
+    expect(b.newestId).toBe(4);
+  });
+
+  it('since(0) returns all events', () => {
+    const b = new EventBuffer(10);
+    b.push('a', { x: 1 });
+    b.push('b', { x: 2 });
+    expect(b.since(0)?.length).toBe(2);
+  });
+
+  it('since(newestId) returns empty', () => {
+    const b = new EventBuffer(10);
+    b.push('a', {});
+    b.push('b', {});
+    expect(b.since(2)).toEqual([]);
+  });
+
+  it('since(lastId older than oldest) returns null (gap)', () => {
+    const b = new EventBuffer(3);
+    b.push('a', {}); b.push('b', {}); b.push('c', {}); b.push('d', {});
+    // oldest is id=2, requesting since(0) means we need id=1 which is gone
+    expect(b.since(0)).toBeNull();
+  });
+
+  it('empty buffer: oldestId null, newestId 0', () => {
+    const b = new EventBuffer(10);
+    expect(b.oldestId).toBeNull();
+    expect(b.newestId).toBe(0);
+  });
+});
+```
+
+### Step 2b.2: 写 EventBuffer 实现
+
+- [ ] Create `server/src/event-buffer.ts`:
+
+```ts
+export interface BufferedEvent {
+  id: number;
+  type: string;
+  data: unknown;
+}
+
+export class EventBuffer {
+  private events: BufferedEvent[] = [];
+  private nextId = 1;
+  private readonly maxSize: number;
+
+  constructor(maxSize = 1000) {
+    this.maxSize = maxSize;
+  }
+
+  push(type: string, data: unknown): BufferedEvent {
+    const event: BufferedEvent = { id: this.nextId++, type, data };
+    this.events.push(event);
+    if (this.events.length > this.maxSize) {
+      this.events.shift();
+    }
+    return event;
+  }
+
+  /**
+   * Returns events with id > lastId.
+   * Returns null if lastId is older than our oldest buffered event (gap).
+   * Returns [] if lastId === newestId or buffer empty.
+   */
+  since(lastId: number): BufferedEvent[] | null {
+    if (this.events.length === 0) return [];
+    const oldest = this.events[0].id;
+    if (lastId + 1 < oldest) return null;
+    return this.events.filter((e) => e.id > lastId);
+  }
+
+  get oldestId(): number | null {
+    return this.events.length > 0 ? this.events[0].id : null;
+  }
+
+  get newestId(): number {
+    return this.nextId - 1;
+  }
+}
+```
+
+### Step 2b.3: 跑 EventBuffer 测试
+
+- [ ] Run:
+
+```bash
+cd /Users/airoucat/workspace/shulex/claude-companion/server
+pnpm test
+```
+
+Expected: 7（serialize）+ 6（event-buffer）= 13 PASS。
+
+### Step 2b.4: 写 chat-rest.ts
+
+- [ ] Create `server/src/chat-rest.ts`:
+
+```ts
+import type { FastifyInstance } from 'fastify';
+import { resolve } from 'node:path';
+
+import type { PermissionMode } from '@cc/shared';
+
+import { isPathAllowed, settings } from './config.js';
+import { EventBuffer } from './event-buffer.js';
+import { messageToWire } from './serialize.js';
+import { ChatSession } from './session-manager.js';
+
+interface SessionEntry {
+  session: ChatSession;
+  buffer: EventBuffer;
+  graceTimer?: NodeJS.Timeout;
+  writers: Set<{ write: (s: string) => void; end: () => void }>;
+}
+
+const sessions = new Map<string, SessionEntry>();
+const GRACE_MS = 30_000;
+const HEARTBEAT_MS = 15_000;
+
+function makeSessionId(): string {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function broadcast(entry: SessionEntry, type: string, data: unknown): void {
+  const ev = entry.buffer.push(type, data);
+  const payload = `id: ${ev.id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const w of entry.writers) {
+    try { w.write(payload); } catch { /* writer gone */ }
+  }
+}
+
+function cancelGrace(entry: SessionEntry): void {
+  if (entry.graceTimer) {
+    clearTimeout(entry.graceTimer);
+    entry.graceTimer = undefined;
+  }
+}
+
+function startGrace(id: string, entry: SessionEntry): void {
+  if (entry.graceTimer) return;
+  entry.graceTimer = setTimeout(() => {
+    closeSession(id);
+  }, GRACE_MS);
+}
+
+function closeSession(id: string): void {
+  const entry = sessions.get(id);
+  if (!entry) return;
+  cancelGrace(entry);
+  entry.session.close();
+  for (const w of entry.writers) {
+    try { w.end(); } catch { /* */ }
+  }
+  sessions.delete(id);
+}
+
+async function consumeSdk(id: string, entry: SessionEntry): Promise<void> {
+  try {
+    const iter = entry.session.start();
+    for await (const sdkMsg of iter) {
+      const wire = messageToWire(sdkMsg);
+      if (wire) {
+        const stamped = { ...wire, timestamp: Date.now() };
+        broadcast(entry, (wire as any).type, stamped);
+      }
+    }
+  } catch (err) {
+    broadcast(entry, 'error', { type: 'error', message: (err as Error).message });
+  }
+}
+
+export async function registerChatRest(app: FastifyInstance): Promise<void> {
+  app.post<{ Body: { cwd?: string; permission_mode?: PermissionMode; resume?: string; model?: string } }>(
+    '/chat/start',
+    async (req, reply) => {
+      const body = req.body ?? {};
+      if (!body.cwd) { reply.code(400); return { error: 'cwd required' }; }
+      const cwd = resolve(body.cwd);
+      if (!isPathAllowed(cwd)) { reply.code(403); return { error: `Project not allowed: ${cwd}` }; }
+      const permissionMode = body.permission_mode ?? settings.permissionMode;
+      const id = makeSessionId();
+      const session = new ChatSession({
+        cwd, permissionMode, resume: body.resume, model: body.model,
+      });
+      const entry: SessionEntry = { session, buffer: new EventBuffer(), writers: new Set() };
+      sessions.set(id, entry);
+      consumeSdk(id, entry).catch(() => {});
+      return {
+        session_id: id,
+        cwd,
+        permission_mode: permissionMode,
+        resumed: body.resume ?? null,
+      };
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { lastEventId?: string } }>(
+    '/chat/:id/events',
+    (req, reply) => {
+      const { id } = req.params;
+      const entry = sessions.get(id);
+      if (!entry) { reply.code(404); return reply.send({ error: 'session not found' }); }
+      cancelGrace(entry);
+
+      const lastIdHeader = (req.headers['last-event-id'] as string | undefined) ?? req.query.lastEventId;
+      const lastId = lastIdHeader ? parseInt(lastIdHeader, 10) : 0;
+      if (lastId > 0) {
+        const probe = entry.buffer.since(lastId);
+        if (probe === null) { reply.code(412); return reply.send({ error: 'event gap, please reload' }); }
+      }
+
+      reply.raw.setHeader('Content-Type', 'text/event-stream');
+      reply.raw.setHeader('Cache-Control', 'no-cache');
+      reply.raw.setHeader('Connection', 'keep-alive');
+      reply.raw.flushHeaders();
+
+      const writer = {
+        write: (s: string) => reply.raw.write(s),
+        end: () => reply.raw.end(),
+      };
+      entry.writers.add(writer);
+
+      if (lastId > 0) {
+        const replay = entry.buffer.since(lastId) ?? [];
+        for (const e of replay) {
+          writer.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`);
+        }
+      }
+
+      const heartbeat = setInterval(() => {
+        try { writer.write(`: heartbeat\n\n`); } catch { /* */ }
+      }, HEARTBEAT_MS);
+
+      req.raw.on('close', () => {
+        clearInterval(heartbeat);
+        entry.writers.delete(writer);
+        if (entry.writers.size === 0) {
+          startGrace(id, entry);
+        }
+      });
+
+      return reply;  // hijacked stream; don't auto-end
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { text: string } }>(
+    '/chat/:id/message',
+    async (req, reply) => {
+      const entry = sessions.get(req.params.id);
+      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      entry.session.pushUserMessage(req.body.text);
+      return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>('/chat/:id/interrupt', async (req, reply) => {
+    const entry = sessions.get(req.params.id);
+    if (!entry) { reply.code(404); return { error: 'session not found' }; }
+    await entry.session.interrupt();
+    return { ok: true };
+  });
+
+  app.post<{ Params: { id: string }; Body: { model: string } }>(
+    '/chat/:id/set-model',
+    async (req, reply) => {
+      const entry = sessions.get(req.params.id);
+      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      await entry.session.setModel(req.body.model);
+      return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { mode: PermissionMode } }>(
+    '/chat/:id/set-permission-mode',
+    async (req, reply) => {
+      const entry = sessions.get(req.params.id);
+      if (!entry) { reply.code(404); return { error: 'session not found' }; }
+      await entry.session.setPermissionMode(req.body.mode);
+      return { ok: true };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/chat/:id', async (req) => {
+    closeSession(req.params.id);
+    return { ok: true };
+  });
+}
+
+// Exported only for AskUserQuestion wiring in later tasks to access registry/session.
+export function getSessionEntry(id: string): SessionEntry | undefined {
+  return sessions.get(id);
+}
+```
+
+⚠️ 注意：`answerQuestion` 路由暂时不写 —— 留给 Task 8 加（那时 ChatSession 才有 `answerQuestion()` 方法）。
+
+### Step 2b.5: 在 index.ts 注册 chat-rest（保留 ws-chat 双栈）
+
+- [ ] Modify `server/src/index.ts`：
+
+顶部 import 加：
+```ts
+import { registerChatRest } from './chat-rest.js';
+```
+
+在 `await registerSessionsApi(app);` 这行后面加：
+```ts
+await registerChatRest(app);
+```
+
+`ws-chat.ts` 的注册（`app.get('/ws/session', { websocket: true }, ...)`) **暂时不删** —— Task 2c 末尾再删。
+
+### Step 2b.6: typecheck + test
+
+- [ ] Run:
+
+```bash
+pnpm typecheck && pnpm test
+```
+
+Expected: 无 error；13 测试 PASS。
+
+### Step 2b.7: curl smoke
+
+- [ ] 启 server `pnpm dev`，新 terminal：
+
+```bash
+# 替换 <CWD> 为你 config 里 whitelisted 的项目
+START=$(curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"cwd":"<CWD>"}' http://localhost:8787/chat/start)
+echo $START
+SID=$(echo $START | jq -r .session_id)
+echo "session: $SID"
+
+# 后台开 SSE 流
+curl -s --no-buffer "http://localhost:8787/chat/$SID/events" &
+SSE_PID=$!
+sleep 1
+
+# 发一条消息
+curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"text":"hello, say hi back"}' \
+  "http://localhost:8787/chat/$SID/message"
+
+# 观察 stdout 应该有 SSE event stream 滚动出来
+sleep 30
+
+# 清理
+kill $SSE_PID
+curl -X DELETE "http://localhost:8787/chat/$SID"
+```
+
+Expected: SSE 流里看到 `id: 1`, `event: assistant`, `data: {...}` 这种格式的事件，包含 Claude 的回复内容。
+
+### Step 2b.8: Commit
+
+- [ ] Run:
+
+```bash
+git add server/src/event-buffer.ts server/src/__tests__/event-buffer.test.ts server/src/chat-rest.ts server/src/index.ts
+git commit -m "feat(server): chat REST + SSE transport with Last-Event-ID resume"
+```
+
+---
+
+## Task 2c: §5 Client — 切到 SSE + REST（删 WS chat）
+
+**目标**：客户端从 WebSocket 切到 SSE + REST。Task 2c 末尾删除 server 的 `/ws/session` 注册和 `ws-chat.ts`。
+
+**Files:**
+- Create: `app/lib/api/sse_client.dart`
+- Create: `app/lib/api/chat_api.dart`
+- Modify: `app/lib/screens/tabs/chat_tab.dart`（_ChatTabState 大改）
+- Modify: `server/src/index.ts`（删 ws-chat 注册）
+- Delete: `server/src/ws-chat.ts`（移除文件）
+
+### Step 2c.1: 写 sse_client.dart
+
+- [ ] Create `app/lib/api/sse_client.dart`:
+
+```dart
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+class SseEvent {
+  final String? id;
+  final String type;
+  final String data;
+  SseEvent({this.id, required this.type, required this.data});
+}
+
+/// 轻量 SSE 客户端：解析 wire format、维护 Last-Event-ID、自动指数退避重连。
+class SseClient {
+  final Uri url;
+  final Map<String, String> headers;
+  String? _lastEventId;
+  http.Client? _httpClient;
+  StreamSubscription<List<int>>? _sub;
+  final _events = StreamController<SseEvent>.broadcast();
+  bool _closed = false;
+  int _backoffMs = 1000;
+  static const _maxBackoffMs = 30000;
+
+  SseClient({required this.url, this.headers = const {}});
+
+  Stream<SseEvent> get events => _events.stream;
+
+  /// 进入持续重连循环。close() 之前不会自然返回。
+  Future<void> connect() async {
+    while (!_closed) {
+      try {
+        await _connectOnce();
+        if (_closed) return;
+      } catch (e) {
+        _events.add(SseEvent(type: '__client_error', data: e.toString()));
+      }
+      if (_closed) return;
+      await Future.delayed(Duration(milliseconds: _backoffMs));
+      _backoffMs = (_backoffMs * 2).clamp(1000, _maxBackoffMs);
+    }
+  }
+
+  Future<void> _connectOnce() async {
+    _httpClient = http.Client();
+    final request = http.Request('GET', url);
+    request.headers.addAll({
+      'Accept': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      ...headers,
+    });
+    if (_lastEventId != null) {
+      request.headers['Last-Event-ID'] = _lastEventId!;
+    }
+    final response = await _httpClient!.send(request);
+    if (response.statusCode == 412) {
+      _events.add(SseEvent(type: '__gap', data: 'event gap, reload required'));
+      _closed = true;
+      return;
+    }
+    if (response.statusCode != 200) {
+      throw Exception('SSE HTTP ${response.statusCode}');
+    }
+    _backoffMs = 1000;
+
+    final buffer = StringBuffer();
+    final completer = Completer<void>();
+    _sub = response.stream.listen(
+      (chunk) {
+        buffer.write(utf8.decode(chunk, allowMalformed: true));
+        _drainBuffer(buffer);
+      },
+      onDone: () => completer.complete(),
+      onError: (e) => completer.completeError(e),
+      cancelOnError: true,
+    );
+    await completer.future;
+  }
+
+  void _drainBuffer(StringBuffer buffer) {
+    final str = buffer.toString();
+    int sep;
+    int startIdx = 0;
+    while ((sep = str.indexOf('\n\n', startIdx)) >= 0) {
+      final block = str.substring(startIdx, sep);
+      _parseEvent(block);
+      startIdx = sep + 2;
+    }
+    final remaining = str.substring(startIdx);
+    buffer.clear();
+    buffer.write(remaining);
+  }
+
+  void _parseEvent(String block) {
+    String? id;
+    String type = 'message';
+    final dataLines = <String>[];
+    for (final line in block.split('\n')) {
+      if (line.startsWith(':')) continue; // SSE comment
+      final colon = line.indexOf(':');
+      if (colon < 0) continue;
+      final field = line.substring(0, colon);
+      var value = line.substring(colon + 1);
+      if (value.startsWith(' ')) value = value.substring(1);
+      switch (field) {
+        case 'id':
+          id = value;
+          break;
+        case 'event':
+          type = value;
+          break;
+        case 'data':
+          dataLines.add(value);
+          break;
+      }
+    }
+    if (id != null) _lastEventId = id;
+    _events.add(SseEvent(id: id, type: type, data: dataLines.join('\n')));
+  }
+
+  Future<void> close() async {
+    _closed = true;
+    await _sub?.cancel();
+    _httpClient?.close();
+    await _events.close();
+  }
+}
+```
+
+### Step 2c.2: 写 chat_api.dart
+
+- [ ] Create `app/lib/api/chat_api.dart`:
+
+```dart
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+class ChatStartResponse {
+  final String sessionId;
+  final String cwd;
+  final String permissionMode;
+  final String? resumed;
+  ChatStartResponse({
+    required this.sessionId,
+    required this.cwd,
+    required this.permissionMode,
+    this.resumed,
+  });
+  factory ChatStartResponse.fromJson(Map<String, dynamic> j) => ChatStartResponse(
+        sessionId: j['session_id'] as String,
+        cwd: j['cwd'] as String,
+        permissionMode: j['permission_mode'] as String,
+        resumed: j['resumed'] as String?,
+      );
+}
+
+class ChatApiException implements Exception {
+  final int status;
+  final String message;
+  ChatApiException(this.status, this.message);
+  @override
+  String toString() => 'ChatApiException($status): $message';
+}
+
+class ChatApi {
+  final String httpBase;
+  ChatApi(this.httpBase);
+
+  Future<ChatStartResponse> start({
+    required String cwd,
+    String? permissionMode,
+    String? resume,
+    String? model,
+  }) async {
+    final resp = await http.post(
+      Uri.parse('$httpBase/chat/start'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'cwd': cwd,
+        if (permissionMode != null) 'permission_mode': permissionMode,
+        if (resume != null) 'resume': resume,
+        if (model != null) 'model': model,
+      }),
+    );
+    if (resp.statusCode != 200) {
+      throw ChatApiException(resp.statusCode, resp.body);
+    }
+    return ChatStartResponse.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+  }
+
+  Future<void> sendMessage(String sessionId, String text) async {
+    final resp = await http.post(
+      Uri.parse('$httpBase/chat/$sessionId/message'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'text': text}),
+    );
+    if (resp.statusCode != 200) {
+      throw ChatApiException(resp.statusCode, resp.body);
+    }
+  }
+
+  Future<void> answerQuestion(
+    String sessionId,
+    String toolUseId,
+    Map<String, String> answers,
+    Map<String, Map<String, String>>? annotations,
+  ) async {
+    final resp = await http.post(
+      Uri.parse('$httpBase/chat/$sessionId/answer-question'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'tool_use_id': toolUseId,
+        'answers': answers,
+        if (annotations != null) 'annotations': annotations,
+      }),
+    );
+    if (resp.statusCode != 200) {
+      throw ChatApiException(resp.statusCode, resp.body);
+    }
+  }
+
+  Future<void> interrupt(String sessionId) async {
+    await http.post(Uri.parse('$httpBase/chat/$sessionId/interrupt'));
+  }
+
+  Future<void> setModel(String sessionId, String model) async {
+    await http.post(
+      Uri.parse('$httpBase/chat/$sessionId/set-model'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'model': model}),
+    );
+  }
+
+  Future<void> setPermissionMode(String sessionId, String mode) async {
+    await http.post(
+      Uri.parse('$httpBase/chat/$sessionId/set-permission-mode'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'mode': mode}),
+    );
+  }
+
+  Future<void> close(String sessionId) async {
+    await http.delete(Uri.parse('$httpBase/chat/$sessionId'));
+  }
+}
+```
+
+### Step 2c.3: 改造 chat_tab.dart 的 _ChatTabState
+
+这一步是 Task 2c 主体。把 WebSocket 相关代码（`_channel`, `_openSessionWebSocket`, `_onData`, `_onError`, `_onDone`）替换为 `ChatApi` + `SseClient`。
+
+- [ ] 顶部 import 调整：
+
+删掉：
+```dart
+import 'package:web_socket_channel/web_socket_channel.dart';
+```
+
+加：
+```dart
+import '../../api/chat_api.dart';
+import '../../api/sse_client.dart';
+```
+
+- [ ] 替换 `_ChatTabState` 中的字段：
+
+```dart
+// 删掉：
+WebSocketChannel? _channel;
+
+// 加：
+ChatApi? _chatApi;
+SseClient? _sseClient;
+String? _sessionId;
+```
+
+- [ ] 替换 `_openSessionWebSocket` 方法为 `_openSseSession`：
+
+```dart
+Future<void> _openSseSession(String httpBase, CurrentSession session) async {
+  // History first
+  if (session.resumeId != null) {
+    _loadHistory(httpBase, session.cwd, session.resumeId!);
+  }
+
+  _chatApi = ChatApi(httpBase);
+  final model = ref.read(currentModelProvider);
+  final permMode = ref.read(permissionModeProvider);
+
+  try {
+    final start = await _chatApi!.start(
+      cwd: session.cwd,
+      permissionMode: _permModeToString(permMode),
+      resume: session.resumeId,
+      model: model.id,
+    );
+    _sessionId = start.sessionId;
+    if (!mounted) return;
+    setState(() {
+      _connected = true;
+      _attempting = false;
+    });
+  } catch (e) {
+    _attempting = false;
+    if (!mounted) return;
+    setState(() => _error = '$e');
+    return;
+  }
+
+  final sseUrl = Uri.parse('$httpBase/chat/$_sessionId/events');
+  _sseClient = SseClient(url: sseUrl);
+  _sseClient!.events.listen(_onSseEvent);
+  // 不 await — 在后台跑重连循环
+  unawaited(_sseClient!.connect());
+}
+```
+
+- [ ] 加 `_onSseEvent`，把原来 `_onData` 的逻辑放进来（去掉 jsonDecode 那一层；data 已经是字符串，但需要 jsonDecode）：
+
+```dart
+void _onSseEvent(SseEvent ev) {
+  if (ev.type.startsWith('__')) {
+    // __client_error / __gap：内部状态事件
+    if (ev.type == '__gap') {
+      // 缓冲 gap：刷历史
+      setState(() => _error = 'event gap, reloading…');
+      _channel?.sink.close();
+      _channel = null;
+      _attemptedKey = null;
+      // 触发重连：_ensureConnected 会重新走一遍
+    }
+    return;
+  }
+  try {
+    final json = jsonDecode(ev.data) as Map<String, dynamic>;
+    _handleWireMessage(json);
+  } catch (_) { /* malformed event, skip */ }
+}
+```
+
+- [ ] 抽取原 `_onData` 内除 jsonDecode 外的所有逻辑为 `_handleWireMessage(Map<String, dynamic> json)`，签名调整：
+
+原 `_onData(dynamic raw)` 是 `final json = jsonDecode(raw as String) as Map<String, dynamic>;` 然后用 json 做一堆 switch。把那段全部移到 `_handleWireMessage(json)`，删掉 jsonDecode 那行。`_onError` / `_onDone` 可以删除。
+
+- [ ] 修改 `_ensureConnected` 调用点：
+
+```dart
+// 把 _openSessionWebSocket(config.wsBase, session) 换成：
+_openSseSession(config.httpBase, session);
+```
+
+注意：`_resumeWithHolderCheck` 内部最后也是调 `_openSessionWebSocket`，改为 `_openSseSession`。`wsBase` 参数可以删除（不再需要）。
+
+- [ ] 改 `_submit()`（发消息）：
+
+```dart
+// 把原来的：
+_channel!.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
+
+// 换成：
+if (_sessionId != null) {
+  unawaited(_chatApi!.sendMessage(_sessionId!, text));
+}
+```
+
+- [ ] 改 `_onStop()`、`_onSwitchModel(...)`、`_onSwitchPermissionMode(...)` 同理 —— 把 `_channel!.sink.add(jsonEncode(...))` 换成对应的 `_chatApi!.interrupt(...)` / `.setModel(...)` / `.setPermissionMode(...)`。具体实现：
+
+```dart
+void _onStop() {
+  if (_sessionId != null) unawaited(_chatApi!.interrupt(_sessionId!));
+}
+
+void _onSwitchModel(ModelOption m) {
+  ref.read(currentModelProvider.notifier).state = m;
+  if (_sessionId != null) unawaited(_chatApi!.setModel(_sessionId!, m.id));
+}
+
+void _onSwitchPermissionMode(CcPermissionMode mode) {
+  ref.read(permissionModeProvider.notifier).state = mode;
+  if (_sessionId != null) unawaited(_chatApi!.setPermissionMode(_sessionId!, _permModeToString(mode)));
+}
+```
+
+- [ ] 加 enum 字符串转换的小工具：
+
+```dart
+String _permModeToString(CcPermissionMode m) {
+  switch (m) {
+    case CcPermissionMode.defaultMode: return 'default';
+    case CcPermissionMode.acceptEdits: return 'acceptEdits';
+    case CcPermissionMode.plan: return 'plan';
+    case CcPermissionMode.bypassPermissions: return 'bypassPermissions';
+  }
+}
+```
+
+- [ ] 改 `dispose()`：
+
+```dart
+@override
+void dispose() {
+  WidgetsBinding.instance.removeObserver(this);
+  _thoughtForTimer?.cancel();
+  // 关闭 SSE
+  _sseClient?.close();
+  // 主动通知 server 关闭 session（best-effort，失败也无所谓）
+  if (_sessionId != null && _chatApi != null) {
+    unawaited(_chatApi!.close(_sessionId!));
+  }
+  _textController.dispose();
+  _scrollController.removeListener(_onScroll);
+  _scrollController.dispose();
+  super.dispose();
+}
+```
+
+### Step 2c.4: flutter analyze
+
+- [ ] Run:
+
+```bash
+cd /Users/airoucat/workspace/shulex/claude-companion/app
+flutter analyze lib/api/sse_client.dart lib/api/chat_api.dart lib/screens/tabs/chat_tab.dart
+```
+
+Expected: 无 error。可能有"未使用的 import"，按 IDE 提示清理。
+
+### Step 2c.5: 手动 smoke
+
+- [ ] 启 server + app
+- [ ] 打开 chat tab：
+  - 期望：能正常发消息，能看到 Claude 流式回复
+  - 期望：interrupt 按钮能停下生成
+  - 期望：切模型、切权限模式 OK
+- [ ] 测试断线重连：
+  - 在 app 流式回复进行中飞行模式打开 10s 再关闭
+  - 期望：流暂停后能续接，不丢中间内容（30s 内 buffer 续传）
+- [ ] 测试 grace 超时：
+  - 关 app 30+ 秒 → 重开 → server 端 session 已 GC
+  - 期望：重新触发 _ensureConnected 走新会话
+
+### Step 2c.6: 删除 ws-chat.ts + 注册
+
+- [ ] Modify `server/src/index.ts`，删除：
+
+```ts
+// 删除这两行：
+import { handleChatSocket } from './ws-chat.js';
+// ...
+app.get('/ws/session', { websocket: true }, (socket, req) => {
+  handleChatSocket(socket, req);
+});
+```
+
+- [ ] 删除文件：
+
+```bash
+cd /Users/airoucat/workspace/shulex/claude-companion
+rm server/src/ws-chat.ts
+```
+
+⚠️ 注意：删文件是有损操作。本步骤之前 git 已有 ws-chat.ts 的历史，rm 之后追加 commit 即可，不需要特殊保护。
+
+### Step 2c.7: typecheck 确认 server 还能编译
+
+- [ ] Run:
+
+```bash
+cd /Users/airoucat/workspace/shulex/claude-companion/server
+pnpm typecheck && pnpm test
+```
+
+Expected: 无 error；13 测试 PASS。
+
+### Step 2c.8: Commit
+
+- [ ] Run:
+
+```bash
+git add app/lib/api/sse_client.dart app/lib/api/chat_api.dart app/lib/screens/tabs/chat_tab.dart server/src/index.ts
+git rm server/src/ws-chat.ts
+git commit -m "feat(chat): migrate transport to SSE + REST (delete ws-chat)"
+```
+
+---
+
 ## Task 3: §2 Server 端 `/upload` 端点
 
 **目标**：把附件接到 server 的 cwd 下。
@@ -870,9 +1777,10 @@ import '../../api/upload_api.dart';
 
 ### Step 4.6: 改 _submit 把附件路径拼进文本
 
-- [ ] 找到 `chat_tab.dart` 里的 `_submit()`（grep `void _submit`）方法，在准备发送 text 之前增加附件拼接逻辑。具体位置：取出 `text` 之后、`_channel!.sink.add(...)` 之前。
+⚠️ 此时 chat_tab.dart 已经在 Task 2c 中切到了 `_chatApi.sendMessage(...)`，所以这里改的是 `_chatApi.sendMessage` 之前的 text 组装部分。
 
-把发送文本组装替换为：
+- [ ] 找到 `chat_tab.dart` 里的 `_submit()`（grep `void _submit`）方法，在 `_chatApi!.sendMessage(_sessionId!, ...)` 之前组装附件路径：
+
 ```dart
 final raw = _textController.text.trim();
 final attachLines = _attachments
@@ -883,7 +1791,7 @@ final text = attachLines.isEmpty
     ? raw
     : '$raw\n\n附件：\n${attachLines.join('\n')}';
 if (text.isEmpty) return;
-// ... 现有的 _channel sink.add 走 text 这个变量
+// 后续走 _chatApi.sendMessage(_sessionId!, text)（已由 Task 2c 替换）
 ```
 
 发送成功后清空附件（`_textController.clear();` 那行附近加）：
@@ -1176,51 +2084,56 @@ git commit -m "feat(composer): attachment upload with path injection"
 
 ---
 
-## Task 5: §4 协议层 — 新增 `answer_question` 消息类型
+## Task 5: §4 协议层 — `AnswerQuestionRequest` REST 类型
 
-**目标**：先把 wire 协议落地，后续 server/client 都按这个 contract 实现。
+**目标**：在 Task 2b/2c 完成 SSE 迁移后，`answer_question` 不再是 WS 消息变体，而是 `POST /chat/<id>/answer-question` 的请求 body 类型。这一 task 同时清理 `ChatClientMessage` union 残留（如果 Task 2b/2c 没顺手清的话）。
 
 **Files:**
 - Modify: `packages/shared/src/protocol.ts`
 
-### Step 5.1: 扩展 ChatClientMessage
+### Step 5.1: 添加 AnswerQuestionRequest 类型
 
-- [ ] Modify `packages/shared/src/protocol.ts`，把 `ChatClientMessage` 加一支：
+- [ ] Modify `packages/shared/src/protocol.ts`，在文件靠下位置（紧跟 §5 SSE 已添加的其他 REST 类型，例如 `ChatStartRequest`、`SendMessageRequest` 之后）加：
 
 ```ts
-export type ChatClientMessage =
-  | { type: 'init'; cwd: string; permission_mode?: PermissionMode; resume?: string; model?: string }
-  | { type: 'user_message'; text: string }
-  | { type: 'set_model'; model: string }
-  | { type: 'set_permission_mode'; mode: PermissionMode }
-  | { type: 'interrupt' }
-  | { type: 'ping' }
-  | {
-      type: 'answer_question';
-      tool_use_id: string;
-      answers: Record<string, string>;
-      annotations?: Record<string, { preview?: string; notes?: string }>;
-    };
+/** POST /chat/<id>/answer-question 请求 body */
+export interface AnswerQuestionRequest {
+  tool_use_id: string;
+  answers: Record<string, string>;
+  annotations?: Record<string, { preview?: string; notes?: string }>;
+}
 ```
 
-### Step 5.2: typecheck
+### Step 5.2: 确认 ChatClientMessage 已删
+
+Task 2b/2c 应该已经把 `ChatClientMessage` union 删干净。如果还残留，删掉。
+
+- [ ] 检查：
+
+```bash
+cd /Users/airoucat/workspace/shulex/claude-companion
+grep -n "ChatClientMessage" packages/shared/src/protocol.ts || echo "OK: not found"
+```
+
+Expected: `OK: not found`
+
+### Step 5.3: typecheck
 
 - [ ] Run:
 
 ```bash
-cd /Users/airoucat/workspace/shulex/claude-companion
 pnpm -r typecheck
 ```
 
-Expected: 无 error。
+Expected: 无 error（特别是 server 端引用 `AnswerQuestionRequest` 的地方在 Task 8 才出现，这里只确认类型本身能编译）。
 
-### Step 5.3: Commit
+### Step 5.4: Commit
 
 - [ ] Run:
 
 ```bash
 git add packages/shared/src/protocol.ts
-git commit -m "feat(protocol): add answer_question client message type"
+git commit -m "feat(protocol): add AnswerQuestionRequest REST body type"
 ```
 
 ---
@@ -1522,11 +2435,11 @@ git commit -m "feat(server): AskUserQuestion MCP tool factory + formatAnswers"
 
 ---
 
-## Task 8: §4 Server — 把 askRegistry 接入 ChatSession + ws-chat
+## Task 8: §4 Server — 把 askRegistry 接入 ChatSession + chat-rest
 
 **Files:**
 - Modify: `server/src/session-manager.ts`
-- Modify: `server/src/ws-chat.ts`
+- Modify: `server/src/chat-rest.ts`（在 §5 SSE 迁移基础上加 AnswerQuestion 路由 + askRegistry per session）
 
 ### Step 8.1: ChatSession 注入 askRegistry
 
@@ -1591,51 +2504,79 @@ answerQuestion(
 import { formatAnswers } from './ask-user-tool.js';
 ```
 
-### Step 8.2: ws-chat.ts 创建 registry per socket + handle answer_question
+### Step 8.2: chat-rest.ts 接入 askRegistry per session + AnswerQuestion 路由
 
-- [ ] Modify `server/src/ws-chat.ts`：
+- [ ] Modify `server/src/chat-rest.ts`：
 
-顶部 import 区加：
+顶部 import 加：
 ```ts
 import { AskUserQuestionRegistry } from './ask-user-tool.js';
+import type { AnswerQuestionRequest } from '@cc/shared';
 ```
 
-在 `handleChatSocket` 函数开头（在 `let session...` 那行之后）加：
+修改 `SessionEntry` interface 加字段：
 ```ts
-const askRegistry = new AskUserQuestionRegistry();
-```
-
-`init` case 里 `new ChatSession({...})` 加 `askRegistry`：
-```ts
-session = new ChatSession({
-  cwd,
-  permissionMode,
-  resume: msg.resume,
-  model: msg.model,
-  askRegistry,
-});
-```
-
-在 switch 内加 case（位置：`'interrupt'` 之后）：
-```ts
-case 'answer_question': {
-  if (!session) {
-    send({ type: 'error', message: 'Session not initialized' });
-    return;
-  }
-  const ok = session.answerQuestion(msg.tool_use_id, msg.answers, msg.annotations);
-  if (!ok) {
-    // 答得太晚或没注册过，不致命，记 log
-    // 用 console.warn 即可；这条不通过 send 上报给 client
-    console.warn('answer_question: no pending tool', msg.tool_use_id);
-  }
-  break;
+interface SessionEntry {
+  session: ChatSession;
+  buffer: EventBuffer;
+  askRegistry: AskUserQuestionRegistry;   // 新增
+  graceTimer?: NodeJS.Timeout;
+  writers: Set<{ write: (s: string) => void; end: () => void }>;
 }
 ```
 
-`socket.on('close')` 和 `on('error')` 里加：
+在 `POST /chat/start` 处理函数里，创建 `askRegistry` 并传给 `ChatSession`：
 ```ts
-askRegistry.rejectAll('socket closed');
+const askRegistry = new AskUserQuestionRegistry();
+const session = new ChatSession({
+  cwd,
+  permissionMode,
+  resume: body.resume,
+  model: body.model,
+  askRegistry,   // 新增
+});
+const entry: SessionEntry = {
+  session,
+  buffer: new EventBuffer(),
+  askRegistry,   // 存在 entry 里以便后续 reject
+  writers: new Set(),
+};
+```
+
+在 `closeSession()` 里清理 askRegistry：
+```ts
+function closeSession(id: string): void {
+  const entry = sessions.get(id);
+  if (!entry) return;
+  cancelGrace(entry);
+  entry.askRegistry.rejectAll('session closed');   // 新增
+  entry.session.close();
+  for (const w of entry.writers) {
+    try { w.end(); } catch { /* */ }
+  }
+  sessions.delete(id);
+}
+```
+
+新增 `POST /chat/:id/answer-question` 路由（放在其它路由之间，例如 `set-permission-mode` 之后）：
+```ts
+app.post<{ Params: { id: string }; Body: AnswerQuestionRequest }>(
+  '/chat/:id/answer-question',
+  async (req, reply) => {
+    const entry = sessions.get(req.params.id);
+    if (!entry) { reply.code(404); return { error: 'session not found' }; }
+    const ok = entry.session.answerQuestion(
+      req.body.tool_use_id,
+      req.body.answers,
+      req.body.annotations,
+    );
+    if (!ok) {
+      // 答得太晚 / tool_use_id 不存在 —— 不致命，记 log
+      app.log.warn({ toolUseId: req.body.tool_use_id }, 'answer_question: no pending tool');
+    }
+    return { ok };
+  },
+);
 ```
 
 ### Step 8.3: typecheck + 跑测试
@@ -1649,25 +2590,57 @@ pnpm typecheck && pnpm test
 
 Expected: 无 error；15 测试仍 PASS。
 
-### Step 8.4: 手动 smoke
+### Step 8.4: 手动 smoke（curl + SSE）
 
-- [ ] 启 server，让 Claude 主动调 AskUserQuestion（最简单的方式：在 prompt 里要求"请用 AskUserQuestion 工具向我问一个问题"）
-- [ ] 用 `wscat` 或 app 连接，观察 ws 流：
-  - 应该看到 `assistant` 消息里 `tool_use` 块，`name` 是 `mcp__ask-user-question__AskUserQuestion`，`input` 是 question 数组
-  - 等待客户端响应（此时 server tool handler 挂起）
-- [ ] 模拟客户端发送：
-  ```json
-  {"type":"answer_question","tool_use_id":"<id from tool_use>","answers":{"<question text>":"<picked label>"}}
-  ```
-- [ ] 应该看到后续 `user` 消息（tool_result）和 Claude 继续生成
+- [ ] 启 server `pnpm dev`，新 terminal：
+
+```bash
+# 起一个会话
+START=$(curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"cwd":"<CWD>"}' http://localhost:8787/chat/start)
+SID=$(echo $START | jq -r .session_id)
+
+# 后台监听 SSE
+curl -s --no-buffer "http://localhost:8787/chat/$SID/events" > /tmp/sse.log &
+SSE_PID=$!
+sleep 1
+
+# 让 Claude 调 AskUserQuestion
+curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"text":"请用 AskUserQuestion 工具向我问一个简单的偏好问题，给我 3 个选项"}' \
+  "http://localhost:8787/chat/$SID/message"
+
+# 等几秒让 Claude 调用工具
+sleep 10
+grep "AskUserQuestion" /tmp/sse.log | head -3
+# 应该能从 SSE 流里看到 tool_use 块，name 是 mcp__ask-user-question__AskUserQuestion
+# 取出其中 tool_use_id、question text、option label
+
+TOOL_ID="<从 SSE 抠出来的 id>"
+Q="<input.questions[0].question>"
+A="<input.questions[0].options[0].label>"
+
+# 模拟客户端回答
+curl -s -X POST -H "Content-Type: application/json" \
+  -d "{\"tool_use_id\":\"$TOOL_ID\",\"answers\":{\"$Q\":\"$A\"}}" \
+  "http://localhost:8787/chat/$SID/answer-question"
+
+# 应该看到 SSE 继续流出 assistant 消息（Claude 收到答案后继续生成）
+sleep 15
+tail -50 /tmp/sse.log
+
+# 清理
+kill $SSE_PID
+curl -X DELETE "http://localhost:8787/chat/$SID"
+```
 
 ### Step 8.5: Commit
 
 - [ ] Run:
 
 ```bash
-git add server/src/session-manager.ts server/src/ws-chat.ts
-git commit -m "feat(server): wire AskUserQuestion MCP tool into ChatSession + ws-chat"
+git add server/src/session-manager.ts server/src/chat-rest.ts
+git commit -m "feat(server): wire AskUserQuestion into chat-rest + ChatSession"
 ```
 
 ---
@@ -1943,17 +2916,12 @@ void _sendAnswerQuestion(
   Map<String, String> answers,
   Map<String, Map<String, String>>? annotations,
 ) {
-  if (_channel == null) return;
-  _channel!.sink.add(jsonEncode({
-    'type': 'answer_question',
-    'tool_use_id': toolUseId,
-    'answers': answers,
-    if (annotations != null) 'annotations': annotations,
-  }));
+  if (_sessionId == null || _chatApi == null) return;
+  unawaited(_chatApi!.answerQuestion(_sessionId!, toolUseId, answers, annotations));
 }
 ```
 
-`jsonEncode` 在 `dart:convert`，已在文件顶部 import 过。
+⚠️ 这里调用的是 Task 2c.2 创建的 `_chatApi.answerQuestion(...)` 方法 —— REST `POST /chat/<id>/answer-question`，不再走 WS。
 
 ### Step 9.4: flutter analyze
 
@@ -2739,9 +3707,11 @@ git commit -m "chore: misc polish from Spec A implementation"
 | §3a tool_result JSON | Task 1 |
 | §3b tool_use input JSON | Task 1b |
 | §4.1-4.2 架构 + Server | Task 6 + 7 + 8 |
-| §4.3 协议 | Task 5 |
+| §4.3 协议（REST 类型） | Task 5 |
 | §4.3-4.4 Client 渲染 | Task 9 (skeleton) + 10 (form) + 11 (preview) |
 | §4.6 妥协 | 已记入 |
+| §5 SSE Server | Task 2b |
+| §5 SSE Client + WS 删除 | Task 2c |
 
 **Placeholder scan**：plan 内无 TBD / TODO / "fill in"。每个 code step 都有完整代码。每个测试 step 都有 expected output。
 
