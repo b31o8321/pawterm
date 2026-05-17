@@ -17,6 +17,51 @@ import { isPathAllowed } from './config.js';
 import { findHolder } from './holder-detect.js';
 import { messageToWire } from './serialize.js';
 
+import { readFile, access, readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+/** Mirrors claude-code's sanitizePath: replace non-alphanumeric chars with '-'. */
+function sanitizePathLocal(p: string): string {
+  return p.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+function localProjectsDir(): string {
+  return join(homedir(), '.claude', 'projects');
+}
+
+/**
+ * Resolve jsonl path for a session. Tries exact match first, then prefix scan.
+ */
+async function resolveJsonlPath(uuid: string, cwd: string): Promise<string | null> {
+  const exact = join(localProjectsDir(), sanitizePathLocal(cwd), `${uuid}.jsonl`);
+  try {
+    await access(exact);
+    return exact;
+  } catch {
+    // Fall back: scan all dirs under ~/.claude/projects for prefix match.
+    const prefix = sanitizePathLocal(cwd).slice(0, 200);
+    let entries: string[];
+    try {
+      entries = await readdir(localProjectsDir());
+    } catch {
+      return null;
+    }
+    for (const name of entries) {
+      if (name === sanitizePathLocal(cwd) || name.startsWith(prefix + '-')) {
+        const candidate = join(localProjectsDir(), name, `${uuid}.jsonl`);
+        try {
+          await access(candidate);
+          return candidate;
+        } catch {
+          continue;
+        }
+      }
+    }
+    return null;
+  }
+}
+
 function requirePath(cwd: string | undefined): string {
   if (!cwd) throw new Error('missing cwd');
   if (!isPathAllowed(cwd)) throw new Error(`Path not allowed: ${cwd}`);
@@ -188,4 +233,87 @@ export async function registerSessionsApi(app: FastifyInstance): Promise<void> {
       return { ok: true };
     },
   );
+
+  /**
+   * GET /sessions/:uuid/raw-history — Read full jsonl directly, bypassing SDK.
+   * Returns all messages including pre-compact history.
+   *
+   * Query: cwd (required), limit (default 50), before_uuid (cursor for older pages)
+   *
+   * Response: same shape as /sessions/:id/messages
+   * { messages: [...], has_more: boolean, total: number }
+   */
+  app.get<{
+    Params: { id: string };
+    Querystring: { cwd: string; limit?: string; before_uuid?: string };
+  }>('/sessions/:id/raw-history', async (req, reply) => {
+    const cwd = requirePath(req.query.cwd);
+    const uuid = req.params.id;
+    const limit = req.query.limit ? Math.max(1, Math.min(500, Number(req.query.limit))) : 50;
+    const beforeUuid = req.query.before_uuid;
+
+    const filePath = await resolveJsonlPath(uuid, cwd);
+    if (!filePath) {
+      reply.code(404);
+      return { error: 'session file not found' };
+    }
+
+    const raw = await readFile(filePath, 'utf-8');
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+
+    type RawEntry = {
+      uuid?: string;
+      parent_uuid?: string;
+      timestamp?: string | number;
+      message?: unknown;
+      isSidechain?: boolean;
+      type?: string;
+      [k: string]: unknown;
+    };
+
+    const parsed: Array<{ uuid: string | null; parent_uuid: string | null; timestamp: number | null; message: unknown }> = [];
+    for (const line of lines) {
+      let entry: RawEntry;
+      try {
+        entry = JSON.parse(line) as RawEntry;
+      } catch {
+        continue;
+      }
+      // Skip sidechain, metadata-only, and non-conversation entries.
+      if (entry.isSidechain) continue;
+      const t = entry.type;
+      if (t !== 'user' && t !== 'assistant' && t !== 'result') continue;
+      // Skip user messages that are only tool_results (no human text).
+      if (t === 'user') {
+        const msg = entry.message as { content?: unknown } | undefined;
+        const content = msg?.content;
+        if (Array.isArray(content) && content.every((b: { type?: string }) => b.type === 'tool_result')) continue;
+      }
+
+      const rawTs = entry.timestamp;
+      const ts =
+        typeof rawTs === 'string' ? Date.parse(rawTs) :
+        typeof rawTs === 'number' ? rawTs :
+        null;
+
+      const wire = messageToWire(entry);
+      parsed.push({
+        uuid: entry.uuid ?? null,
+        parent_uuid: entry.parent_uuid ?? null,
+        timestamp: ts,
+        message: wire ? { ...wire, timestamp: ts ?? undefined } : entry,
+      });
+    }
+
+    const total = parsed.length;
+    let upper = total;
+    if (beforeUuid) {
+      const idx = parsed.findIndex((m) => m.uuid === beforeUuid);
+      if (idx > 0) upper = idx;
+    }
+    const lower = Math.max(0, upper - limit);
+    const slice = parsed.slice(lower, upper);
+
+    return { messages: slice, has_more: lower > 0, total };
+  });
 }
