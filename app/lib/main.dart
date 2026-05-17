@@ -8,6 +8,12 @@ import 'screens/connections_screen.dart';
 import 'state/prefs.dart';
 import 'theme.dart';
 
+/// 全局 RouteObserver，让需要感知"我被 push 覆盖 / 我从被覆盖回到顶层"的 Screen
+/// 通过 RouteAware mixin 订阅。当前用途：ProjectPickerScreen 在 didPopNext
+/// （从 MainShell 返回）时刷新已展开项目的 session 列表，否则 sessionsProvider
+/// 的缓存会让标题/最近时间停留在用户离开前的状态。
+final routeObserver = RouteObserver<PageRoute<dynamic>>();
+
 void main() {
   runApp(const ProviderScope(child: CcApp()));
 }
@@ -37,6 +43,7 @@ class CcApp extends ConsumerWidget {
         GlobalCupertinoLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
       ],
+      navigatorObservers: [routeObserver],
       // 让状态栏 / 导航栏跟随当前主题切换，避免系统 scrim 蒙灰。
       // 用 builder 而非外层 wrap，是为了在 MaterialApp 解析出 Theme 之后再读取。
       builder: (context, child) {
