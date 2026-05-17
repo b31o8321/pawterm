@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { isPathAllowed } from './config.js';
@@ -45,7 +46,10 @@ export async function registerUpload(app: FastifyInstance): Promise<void> {
       return { error: 'cwd not allowed' };
     }
 
-    const part = await req.file({ limits: { fileSize: MAX_FILE_BYTES } });
+    const part = await req.file({
+      limits: { fileSize: MAX_FILE_BYTES },
+      throwFileSizeLimit: false,
+    });
     if (!part) {
       reply.code(400);
       return { error: 'no file' };
@@ -59,9 +63,30 @@ export async function registerUpload(app: FastifyInstance): Promise<void> {
 
     const dir = join(abs, '.claude', 'attachments');
     await mkdir(dir, { recursive: true });
-    const filename = `${timestamp()}-${sanitize(part.filename)}`;
-    const dest = join(dir, filename);
-    await writeFile(dest, buf);
+
+    // Guard against symlink escape: confirm the realpath of dir is still inside cwd.
+    let realDir: string;
+    try {
+      realDir = await realpath(dir);
+    } catch (e) {
+      reply.code(500);
+      return { error: 'attachments directory unavailable' };
+    }
+    const realCwd = await realpath(abs);
+    if (!realDir.startsWith(realCwd)) {
+      reply.code(403);
+      return { error: 'attachments directory escapes cwd via symlink' };
+    }
+
+    const suffix = randomBytes(3).toString('hex');
+    const filename = `${timestamp()}-${suffix}-${sanitize(part.filename)}`;
+    const dest = join(realDir, filename);
+    try {
+      await writeFile(dest, buf);
+    } catch (e) {
+      reply.code(500);
+      return { error: 'failed to write attachment' };
+    }
 
     return { path: dest, size: buf.length };
   });
