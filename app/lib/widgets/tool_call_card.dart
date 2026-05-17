@@ -177,6 +177,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
   ///   - 0 个完成 → 首次创建，显示「已创建 N 个任务」
   ///   - 全部完成 → 最终汇报，显示「全部完成 N/N」
   ///   - 中间状态 → 隐藏（只更新 TodoChip，不占 message 空间）
+  ///   点击可展开查看完整任务列表。
   Widget _todoWriteCard(BuildContext context) {
     final t = AppTokens.of(context);
     final rawList = toolUse.input['todos'] as List<dynamic>? ?? const [];
@@ -188,41 +189,61 @@ class _ToolCallCardState extends State<ToolCallCard> {
     if (completed > 0 && completed < total) return const SizedBox.shrink();
 
     final isFirst = completed == 0;
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: t.surfaceHi,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: t.border, width: 0.5),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            isFirst ? Icons.checklist : Icons.check_circle_outline,
-            size: 13,
-            color: isFirst ? t.accent : t.success,
-          ),
-          const SizedBox(width: 8),
-          Text(
-            isFirst
-                ? '已创建 $total 个任务'
-                : '全部完成 $completed/$total',
-            style: TextStyle(
-              fontSize: 12,
-              color: isFirst ? t.accent : t.success,
-              fontWeight: FontWeight.w500,
+    final color = isFirst ? t.accent : t.success;
+    final label = isFirst ? '已创建 $total 个任务' : '全部完成 $completed/$total';
+
+    return InkWell(
+      onTap: () => setState(() => _expanded = !_expanded),
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: t.surfaceHi,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: t.border, width: 0.5),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  isFirst ? Icons.checklist : Icons.check_circle_outline,
+                  size: 13,
+                  color: color,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: color,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const Spacer(),
+                Icon(
+                  _expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 14,
+                  color: t.textDim,
+                ),
+              ],
             ),
-          ),
-        ],
+            if (_expanded) ...[
+              const SizedBox(height: 8),
+              _TodoList(todos: rawList),
+            ],
+          ],
+        ),
       ),
     );
   }
 
-  /// Edit/Write/Bash 有专属"pretty"视图，显示 pretty|raw 切换。
-  bool _showViewToggle(String name) =>
-      name == 'Edit' || name == 'MultiEdit' || name == 'Write' || name == 'Bash';
+  /// 所有工具（TodoWrite 除外，它有独立卡片）都显示 pretty|raw 切换，
+  /// 保证用户始终能看到原始 JSON 输入。
+  bool _showViewToggle(String name) => name != 'TodoWrite';
 
   Color _colorFor(AppTokens t, String name) {
     switch (name) {
@@ -288,19 +309,24 @@ class _ToolCallCardState extends State<ToolCallCard> {
         final path = (input['file_path'] ?? '').toString();
         text = path.contains('/') ? '…/${path.split('/').last}' : path;
       case 'Bash':
-        final cmd = (input['command'] ?? '').toString().trim();
-        final firstSpace = cmd.indexOf(' ');
-        if (firstSpace < 0 || firstSpace >= cmd.length - 1) {
-          text = cmd;
+        // description 字段是人可读的意图描述，比截断命令更适合做标题
+        final desc = (input['description'] ?? '').toString().trim();
+        if (desc.isNotEmpty) {
+          text = desc;
         } else {
-          final head = cmd.substring(0, firstSpace);
-          final rest = cmd.substring(firstSpace + 1);
-          if (rest.length <= 28) {
-            text = '$head $rest'; // 整条命令短，不需要省略
+          final cmd = (input['command'] ?? '').toString().trim();
+          final firstSpace = cmd.indexOf(' ');
+          if (firstSpace < 0 || firstSpace >= cmd.length - 1) {
+            text = cmd;
           } else {
-            // 取尾部最多 20 个字符，避免切断 unicode（简单字符边界）
-            final tailRaw = cmd.substring(cmd.length - 20);
-            text = '$head … $tailRaw';
+            final head = cmd.substring(0, firstSpace);
+            final rest = cmd.substring(firstSpace + 1);
+            if (rest.length <= 28) {
+              text = '$head $rest';
+            } else {
+              final tailRaw = cmd.substring(cmd.length - 20);
+              text = '$head … $tailRaw';
+            }
           }
         }
       case 'Grep':

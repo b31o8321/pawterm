@@ -336,94 +336,126 @@ class _TodoChipState extends ConsumerState<TodoChip>
 
 // ─── Side panel ────────────────────────────────────────────────────────────
 
-class _TodoSheet extends ConsumerWidget {
+class _TodoSheet extends ConsumerStatefulWidget {
   const _TodoSheet();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_TodoSheet> createState() => _TodoSheetState();
+}
+
+class _TodoSheetState extends ConsumerState<_TodoSheet> {
+  double _dragX = 0; // 向右拖拽的累计偏移（clamp >= 0）
+  double _panelWidth = 300;
+
+  void _onDragUpdate(DragUpdateDetails d) {
+    final dx = d.delta.dx;
+    // 只允许向右拖（正方向），向左拖最多归零，不能把面板拖出左边界
+    setState(() {
+      _dragX = (_dragX + dx).clamp(0.0, double.infinity);
+    });
+  }
+
+  void _onDragEnd(DragEndDetails d) {
+    final vel = d.primaryVelocity ?? 0;
+    // 快速右滑（>300 px/s）或拖超过面板宽度 35% → 关闭
+    if (vel > 300 || _dragX > _panelWidth * 0.35) {
+      Navigator.of(context).pop();
+    } else {
+      setState(() => _dragX = 0); // 未达阈值：弹回
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final t = AppTokens.of(context);
     final s = ref.watch(stringsProvider);
     final todos = ref.watch(todoListProvider);
     final done = todos.where((e) => e.isCompleted).length;
-    final panelWidth =
-        (MediaQuery.of(context).size.width * 0.82).clamp(0.0, 340.0);
-    // Align 会向子节点传递 loose 约束，导致 Column > Expanded 在
-    // showGeneralDialog 的 pageBuilder 里拿到无界高度而崩溃。
-    // 改用 Stack + Positioned(top/bottom) 来提供有界的紧约束。
+
+    _panelWidth = (MediaQuery.of(context).size.width * 0.82).clamp(0.0, 340.0);
+    final slotWidth = _panelWidth + 16; // +16 吸收两侧 padding(8+8)
+
     return Stack(
       children: [
         Positioned(
           top: 0,
           bottom: 0,
           right: 0,
-          width: panelWidth + 16, // +16 吸收两侧 padding(8+8)
+          width: slotWidth,
           child: SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(8),
-              child: Material(
-                type: MaterialType.transparency,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: t.surface,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: t.border),
-                  ),
-                  child: Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 20, 16, 12),
-                        child: Row(
-                          children: [
-                            Icon(Icons.checklist, size: 16, color: t.accent),
-                            const SizedBox(width: 8),
-                            Text(
-                              s.todoSheetTitle,
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: t.text,
-                              ),
-                            ),
-                            const Spacer(),
-                            if (todos.isNotEmpty)
-                              Text(
-                                '$done / ${todos.length}',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: t.textDim,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                            const SizedBox(width: 8),
-                            InkWell(
-                              onTap: () => Navigator.of(context).pop(),
-                              borderRadius: BorderRadius.circular(6),
-                              child: Padding(
-                                padding: const EdgeInsets.all(4),
-                                child: Icon(Icons.close, size: 16, color: t.textDim),
-                              ),
-                            ),
-                          ],
-                        ),
+              child: Transform.translate(
+                offset: Offset(_dragX, 0),
+                child: GestureDetector(
+                  onHorizontalDragUpdate: _onDragUpdate,
+                  onHorizontalDragEnd: _onDragEnd,
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: t.surface,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: t.border),
                       ),
-                      Divider(color: t.borderSubt, height: 0.5),
-                      Expanded(
-                        child: todos.isEmpty
-                            ? Center(
-                                child: Text(
-                                  s.todoEmpty,
-                                  style: TextStyle(fontSize: 13, color: t.textDim),
+                      child: Column(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 20, 16, 12),
+                            child: Row(
+                              children: [
+                                Icon(Icons.checklist, size: 16, color: t.accent),
+                                const SizedBox(width: 8),
+                                Text(
+                                  s.todoSheetTitle,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: t.text,
+                                  ),
                                 ),
-                              )
-                            : ListView.separated(
-                                padding: const EdgeInsets.symmetric(vertical: 4),
-                                itemCount: todos.length,
-                                separatorBuilder: (_, __) => Divider(
-                                    color: t.borderSubt, height: 0.5, indent: 50),
-                                itemBuilder: (_, i) => _TodoRow(item: todos[i]),
-                              ),
+                                const Spacer(),
+                                if (todos.isNotEmpty)
+                                  Text(
+                                    '$done / ${todos.length}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: t.textDim,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                const SizedBox(width: 8),
+                                InkWell(
+                                  onTap: () => Navigator.of(context).pop(),
+                                  borderRadius: BorderRadius.circular(6),
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(4),
+                                    child: Icon(Icons.close, size: 16, color: t.textDim),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Divider(color: t.borderSubt, height: 0.5),
+                          Expanded(
+                            child: todos.isEmpty
+                                ? Center(
+                                    child: Text(
+                                      s.todoEmpty,
+                                      style: TextStyle(fontSize: 13, color: t.textDim),
+                                    ),
+                                  )
+                                : ListView.separated(
+                                    padding: const EdgeInsets.symmetric(vertical: 4),
+                                    itemCount: todos.length,
+                                    separatorBuilder: (_, __) => Divider(
+                                        color: t.borderSubt, height: 0.5, indent: 50),
+                                    itemBuilder: (_, i) => _TodoRow(item: todos[i]),
+                                  ),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
