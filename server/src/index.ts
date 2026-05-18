@@ -5,18 +5,22 @@ import Fastify from 'fastify';
 import { createReadStream } from 'node:fs';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { hostname, homedir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 import type { HealthResponse, Project } from '@cc/shared';
 
 import { registerChatRest } from './chat-rest.js';
-import { settings, addProject, removeProject, isPathAllowed, ProjectExistsError } from './config.js';
+import { settings, addProject, removeProject, isPathAllowed, ProjectExistsError, configPath } from './config.js';
 import { buildLoggerOptions } from './logger.js';
 import { registerSessionsApi } from './sessions-api.js';
 import { registerUpload } from './upload.js';
 import { handleShellSocket } from './ws-shell.js';
 
-const VERSION = '0.2.0';
+const _require = createRequire(import.meta.url);
+const _pkg = _require(join(dirname(fileURLToPath(import.meta.url)), '../../package.json')) as { version: string };
+const VERSION: string = _pkg.version;
 
 async function main(): Promise<void> {
   const app = Fastify({ logger: buildLoggerOptions() });
@@ -235,8 +239,21 @@ async function main(): Promise<void> {
   });
 
   await app.listen({ host: settings.host, port: settings.port });
-  app.log.info(`Claude Companion server v${VERSION} on http://${settings.host}:${settings.port}`);
-  app.log.info(`Projects: ${settings.projects.map((p) => p.name).join(', ') || '(none)'}`);
+
+  app.log.info(
+    [
+      '',
+      `┌─ PawTerm Server v${VERSION}`,
+      `│  node     : ${process.version}`,
+      `│  listen   : http://${settings.host}:${settings.port}`,
+      `│  config   : ${configPath}`,
+      `│  perm mode: ${settings.permissionMode}`,
+      `│  projects :`,
+      ...settings.projects.map((p) => `│    • ${p.name}  (${p.path})`),
+      ...(settings.projects.length === 0 ? ['│    (none)'] : []),
+      `└─ ready`,
+    ].join('\n'),
+  );
 }
 
 main().catch((err) => {
