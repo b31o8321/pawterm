@@ -21,23 +21,34 @@ Grab the latest `pawterm-*-arm64-v8a.apk` from [**Releases**](../../releases/lat
 
 Requires Node 20+ and `claude` CLI logged in.
 
+**One-off / try it out:**
 ```bash
 npx pawterm-server
 ```
 
-First run will create `~/.config/pawterm/config.json` — edit it to add your project paths, then restart.
+**Persistent background service (macOS / Linux):**
+```bash
+npm install -g pawterm-server
+pawterm-server install    # auto-starts at login
+```
 
-> **Manual setup:** `git clone` + `pnpm dev:server` also works — see [Build from source](#build-from-source).
+First run creates `~/.config/pawterm/config.json` — edit it to add your project paths, then restart.
+
+> Other service commands: `start` / `stop` / `restart` / `update` / `logs` / `status` — run `pawterm-server help` for the full list.
 
 ### 3. Connect from the app
 
-Open PawTerm → **Add connection** → enter your machine's IP:
+On startup the server prints a **QR code** — scan it in PawTerm to connect in one tap.
+
+Or add the connection manually:
 
 | Network | Address |
 |---------|---------|
 | Same LAN | `http://192.168.x.x:8765` |
 | Tailscale | `http://100.x.x.x:8765` |
 | Android emulator | `http://10.0.2.2:8765` |
+
+> Running as a background service? Use `pawterm-server logs` to find the QR code.
 
 ## Features
 
