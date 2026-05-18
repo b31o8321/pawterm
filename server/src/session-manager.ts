@@ -12,7 +12,7 @@ import { type AskUserQuestionRegistry, makeAskUserMcpServer } from './ask-user-t
 function resolveLoginShellPath(): string {
   try {
     const shell = process.env.SHELL ?? '/bin/zsh';
-    return execSync(`${shell} -lc 'echo $PATH'`, {
+    return execSync(`${shell} -ilc 'echo $PATH'`, {
       encoding: 'utf-8',
       timeout: 5000,
     }).trim();
