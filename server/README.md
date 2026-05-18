@@ -2,7 +2,12 @@
 
 > Bridge server for [PawTerm](https://github.com/Airoucat233/pawterm) — lets the Android app control Claude Code on your dev machine.
 
-## Quick start
+## Requirements
+
+- Node 20+
+- [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
+
+## Quick start (foreground)
 
 ```bash
 npx pawterm-server
@@ -10,12 +15,14 @@ npx pawterm-server
 
 First run creates `~/.config/pawterm/config.json`. Edit it to add your project paths, then restart.
 
+On startup a QR code is printed in the terminal — scan it with the PawTerm app to connect instantly.
+
 ## Run as a background service (macOS / Linux)
 
 ```bash
 npm install -g pawterm-server
-pawterm-server install   # installs launchd agent (macOS) or systemd user unit (Linux)
-                         # auto-starts at login, logs to ~/.config/pawterm/server.log
+pawterm-server install        # register + start; auto-starts at login
+pawterm-server logs           # tail logs to find the QR code / connection info
 ```
 
 | Command | Description |
@@ -25,16 +32,11 @@ pawterm-server install   # installs launchd agent (macOS) or systemd user unit (
 | `start` | Start the service |
 | `stop` | Stop the service |
 | `restart` | Restart the service |
-| `status` | Show whether the service is running |
 | `update` | Update to latest version and restart |
-| `logs [n]` | Tail service logs (default: last 50 lines) |
+| `status` | Show whether the service is running |
+| `logs [n]` | Tail service logs, default last 50 lines |
 | `--version` | Print installed version |
 | `help` | Show all commands |
-
-## Requirements
-
-- Node 20+
-- [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
 
 ## Config
 
@@ -51,11 +53,14 @@ pawterm-server install   # installs launchd agent (macOS) or systemd user unit (
 }
 ```
 
-Override config path: `CC_CONFIG=/path/to/config.json npx pawterm-server`
+Override config path: `PAWTERM_CONFIG=/path/to/config.json pawterm-server`
 
 ## Connect
 
-Open PawTerm app → Add connection → `http://<your-machine-ip>:8765`
+On startup the server prints a `pawterm://` deep-link QR code.
+
+- **Foreground**: QR code appears directly in the terminal
+- **Background service**: run `pawterm-server logs` to see it, or open PawTerm → Add connection → `http://<your-machine-ip>:8765`
 
 Over Tailscale: `http://100.x.x.x:8765`
 
