@@ -174,6 +174,20 @@ export function runServiceCommand(cmd: string): void {
     return;
   }
 
+  if (cmd === 'update') {
+    console.log('Updating pawterm-server...');
+    exec('npm install -g pawterm-server');
+    if (p === 'darwin' && existsSync(PLIST_PATH)) {
+      tryExec(`launchctl unload "${PLIST_PATH}"`);
+      exec(`launchctl load "${PLIST_PATH}"`);
+      console.log('✓ Service restarted');
+    } else if (p === 'linux') {
+      tryExec('systemctl --user restart pawterm-server');
+      console.log('✓ Service restarted');
+    }
+    return;
+  }
+
   if (cmd === 'logs') {
     if (!existsSync(LOG_PATH)) {
       console.log(`No log file yet: ${LOG_PATH}`);
