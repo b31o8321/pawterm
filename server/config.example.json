@@ -3,7 +3,7 @@
   "port": 8765,
   "permission_mode": "acceptEdits",
   "projects": [
-    { "name": "claude-companion", "path": "~/workspace/shulex/claude-companion" },
+    { "name": "pawterm", "path": "~/workspace/pawterm" },
     { "name": "shulex-gpt", "path": "~/workspace/shulex/shulex-gpt" },
     { "name": "chatflow", "path": "~/workspace/shulex/chatflow" },
     { "name": "agent-builder", "path": "~/workspace/shulex/agent-builder" }

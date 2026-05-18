@@ -6,9 +6,9 @@
 #     ├─ latest.apk                                       # always the newest arm64 build
 #     └─ releases/
 #         └─ <version>/
-#             ├─ claude-companion-<version>-arm64-v8a.apk    # the one your phone wants
-#             ├─ claude-companion-<version>-armeabi-v7a.apk
-#             └─ claude-companion-<version>-x86_64.apk
+#             ├─ pawterm-<version>-arm64-v8a.apk    # the one your phone wants
+#             ├─ pawterm-<version>-armeabi-v7a.apk
+#             └─ pawterm-<version>-x86_64.apk
 
 set -euo pipefail
 
@@ -19,6 +19,29 @@ cd "$APP_DIR"
 PUBSPEC="$APP_DIR/pubspec.yaml"
 OUT_DIR="$APP_DIR/build/app/outputs/flutter-apk"
 RELEASES_DIR="$OUT_DIR/releases"
+
+# -------- 0. Debug shortcut --------
+# Pass --debug (or -d) to skip version bump and build a debug APK instantly.
+
+DEBUG=0
+for arg in "$@"; do
+  case "$arg" in
+    --debug|-d) DEBUG=1 ;;
+  esac
+done
+
+if [[ $DEBUG -eq 1 ]]; then
+  echo
+  echo "▶ flutter build apk --debug --target-platform android-arm64"
+  flutter build apk --debug --target-platform android-arm64
+  APK="$OUT_DIR/app-debug.apk"
+  echo
+  echo "\033[32m✓ debug build done\033[0m"
+  echo "  output: $APK"
+  echo "  size:   $(/usr/bin/du -h "$APK" | /usr/bin/awk '{print $1}')"
+  /usr/bin/open -R "$APK"
+  exit 0
+fi
 
 # -------- 1. Read current version --------
 
@@ -99,19 +122,19 @@ flutter build apk --release --split-per-abi
 VERSION_DIR="$RELEASES_DIR/$VERSION"
 /bin/mkdir -p "$VERSION_DIR"
 
-# Find the freshly built APKs (named via archivesName=claude-companion + abi + buildType)
+# Find the freshly built APKs (named via archivesName=pawterm + abi + buildType)
 shopt -s nullglob 2>/dev/null || setopt nullglob
 ARM64=""
 for f in "$OUT_DIR"/*arm64*-release.apk; do
-  TARGET="$VERSION_DIR/claude-companion-${VERSION}-arm64-v8a.apk"
+  TARGET="$VERSION_DIR/pawterm-${VERSION}-arm64-v8a.apk"
   /bin/cp "$f" "$TARGET"
   ARM64="$TARGET"
 done
 for f in "$OUT_DIR"/*armeabi*-release.apk; do
-  /bin/cp "$f" "$VERSION_DIR/claude-companion-${VERSION}-armeabi-v7a.apk"
+  /bin/cp "$f" "$VERSION_DIR/pawterm-${VERSION}-armeabi-v7a.apk"
 done
 for f in "$OUT_DIR"/*x86_64*-release.apk; do
-  /bin/cp "$f" "$VERSION_DIR/claude-companion-${VERSION}-x86_64.apk"
+  /bin/cp "$f" "$VERSION_DIR/pawterm-${VERSION}-x86_64.apk"
 done
 
 if [[ -z "$ARM64" ]]; then

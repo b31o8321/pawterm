@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 我们连接的是用户自己的局域网/Tailscale 上的 Claude Companion Server,
+    <!-- 我们连接的是用户自己的局域网/Tailscale 上的 PawTerm Server,
          通常没有 TLS（http://192.168.x.x:8765 或 http://100.x.x.x:8765）。
          Android 9+ 默认禁止明文流量，会导致 connect/WebSocket 静默失败。
          这里全局放开 — 安全模型依赖 LAN/Tailscale 网络本身，不依赖 HTTP 层。 -->
@@ -7,7 +7,7 @@
     <!-- 允许安装 APK（通过 open_file_plus 打开 .apk 文件时需要） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
-        android:label="Claude Companion"
+        android:label="PawTerm"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">

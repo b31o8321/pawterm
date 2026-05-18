@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.airoucat.claudecompanion"
+    namespace = "com.airoucat.pawterm"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "27.0.12077973"
 
@@ -20,8 +20,8 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.airoucat.claudecompanion"
-        base.archivesName = "claude-companion"
+        applicationId = "com.airoucat.pawterm"
+        base.archivesName = "pawterm"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

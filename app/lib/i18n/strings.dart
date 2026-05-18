@@ -382,7 +382,7 @@ class Strings {
 }
 
 const Strings stringsEn = Strings(
-  appTitle: 'Claude Companion',
+  appTitle: 'PawTerm',
   appTagline: 'Mobile control for Claude Code',
   tabChat: 'Chat',
   tabShell: 'Shell',
@@ -501,7 +501,7 @@ const Strings stringsEn = Strings(
   settingsTabConnections: 'Connections',
   settingsTabSettings: 'Settings',
   connectionsEmptyHintLong:
-      'Add a machine running Claude Companion Server\nand control it from your phone.',
+      'Add a machine running PawTerm Server\nand control it from your phone.',
   connectionsAddFirst: 'Add the first one',
   connectionsSectionRecent: 'Recent',
   connectionsSectionOther: 'Others',
@@ -556,7 +556,7 @@ const Strings stringsEn = Strings(
 );
 
 const Strings stringsZh = Strings(
-  appTitle: 'Claude Companion',
+  appTitle: 'PawTerm',
   appTagline: '在手机上操控 Claude Code',
   tabChat: '对话',
   tabShell: '终端',
@@ -675,7 +675,7 @@ const Strings stringsZh = Strings(
   settingsTabConnections: '连接',
   settingsTabSettings: '设置',
   connectionsEmptyHintLong:
-      '添加一台运行了 Claude Companion Server\n的机器，就能从手机控制它。',
+      '添加一台运行了 PawTerm Server\n的机器，就能从手机控制它。',
   connectionsAddFirst: '添加第一台',
   connectionsSectionRecent: '最近使用',
   connectionsSectionOther: '其他',

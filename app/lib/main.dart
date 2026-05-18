@@ -26,7 +26,7 @@ class CcApp extends ConsumerWidget {
     final themeMode = ref.watch(prefsProvider);
     final locale = ref.watch(materialLocaleProvider);
     return MaterialApp(
-      title: 'Claude Companion',
+      title: 'PawTerm',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(Brightness.light),
       darkTheme: buildTheme(Brightness.dark),

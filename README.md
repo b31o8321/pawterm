@@ -1,118 +1,73 @@
-# Claude Companion
+# PawTerm
 
-> Mobile + web control surface for your local [Claude Code](https://docs.claude.com/en/docs/claude-code).
-> Drive Claude from your phone or any browser while your dev machine does the actual work.
+> Control AI coding assistants from your phone.  
+> Drive Claude Code (and more) while your dev machine does the actual work.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Flutter](https://img.shields.io/badge/Flutter-Android-02569B?logo=flutter&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
-![Flutter](https://img.shields.io/badge/Flutter-Android%20%2B%20iOS-02569B?logo=flutter&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 
 ## What it is
 
-```
-                ┌──────────────────────────────────┐
-                │   server (Fastify, port 8765)   │
-                │   REST  /health /projects /...   │
-                │   WS    /ws/session /ws/shell    │
-                └────┬─────────────────────┬───────┘
-                     │ HTTP+WS             │ HTTP+WS
-              ┌──────▼──────┐       ┌──────▼──────┐
-              │ Flutter app │       │  Web admin  │
-              │ Android/iOS │       │ port 5173   │
-              └─────────────┘       └─────────────┘
-```
-
-A small bridge service runs on the machine where `claude` CLI is installed. It exposes
-your Claude sessions over WebSocket, with the [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk)
-driving the actual `claude` subprocess. Two clients consume that API:
-
-- **Flutter app** for Android + iOS — chat, terminal (xterm + node-pty), session history.
-- **Web admin** (Vite + React + Tailwind) — full-fledged PC dashboard for the same data.
-
-Both clients share TypeScript protocol types via a small `@cc/shared` workspace package.
-
-## Highlights
-
-- **Streaming**: char-level deltas via the SDK's `includePartialMessages`, rendered live.
-- **Sessions**: list / resume / fork / tag / delete via the SDK's session storage (no DB).
-- **Terminal**: real PTY (`node-pty` on server + `xterm.js` / `xterm.dart` on clients).
-- **Model switch**: change between Sonnet / Opus / Haiku at runtime.
-- **Tool cards**: Edit / Bash / Read / Write / TodoWrite rendered as inline cards with diffs.
-- **Cross-network**: Mac is the dev box; phone reaches it over Tailscale, WireGuard, or LAN.
-
-## Repository layout
+A small bridge server runs on your dev machine (where `claude` CLI is installed). The Android app connects to it over your LAN or Tailscale and gives you a full mobile interface: chat, real terminal, session history, file browser.
 
 ```
-claude-companion/
-├── server/                       Fastify backend (TypeScript)
-│   └── src/
-│       ├── index.ts              entry, route registration
-│       ├── config.ts             project whitelist
-│       ├── session-manager.ts    SDK query() wrapper
-│       ├── ws-chat.ts            /ws/session handler
-│       ├── ws-shell.ts           /ws/shell + node-pty
-│       ├── sessions-api.ts       /sessions/* REST
-│       ├── serialize.ts          SDK msg → wire JSON
-│       └── logger.ts             pino + pretty mode
-├── web/                          Vite + React PC admin
-│   └── src/
-│       ├── App.tsx
-│       ├── api/                  REST + WS clients
-│       ├── layout/               Sidebar / Header / PillBar
-│       ├── tabs/                 Chat / Shell / Files / Git
-│       └── tools/toolConfigs.ts  Tool card registry
-├── app/                          Flutter mobile (Android + iOS)
-│   ├── pubspec.yaml
-│   ├── lib/
-│   │   ├── main.dart
-│   │   ├── theme.dart            AppTokens (dark + light)
-│   │   ├── api/                  protocol + REST client
-│   │   ├── state/                Riverpod stores
-│   │   ├── screens/              Connections / MainShell / Git
-│   │   └── widgets/              Sidebar / MessageView / ToolCard
-│   └── scripts/build-apk.sh      versioned APK builder
-├── packages/shared/              cross-client TS protocol types
-└── docs/
-    └── debug-pipeline.md         how to trace a message end-to-end
+  Your Mac / Linux box
+  ┌────────────────────────────────┐
+  │  PawTerm Server  :8765         │
+  │  Claude Code CLI               │
+  └──────────────┬─────────────────┘
+                 │ WebSocket (LAN / Tailscale)
+          ┌──────▼──────┐
+          │ PawTerm App │
+          │   Android   │
+          └─────────────┘
 ```
 
-## Quick start
+## Install
 
-### Prereqs
+### 1. Download the APK
 
-- Node 20+ (`.nvmrc` pins 20; run `nvm use`)
-- pnpm 9+
-- `claude` CLI installed and logged in (run `claude` once interactively first)
-- Flutter SDK (only if you want to build the mobile app)
+Grab the latest `pawterm-*-arm64-v8a.apk` from [**Releases**](../../releases/latest) and install it on your Android phone.
 
-### Backend + web admin
+> Enable **"Install unknown apps"** in Android settings if prompted.
+
+### 2. Run the server on your dev machine
+
+Requires Node 20+ and `claude` CLI logged in.
 
 ```bash
+git clone https://github.com/airoucat/pawterm.git
+cd pawterm
 pnpm install
-cp server/config.example.json server/config.json   # edit your project whitelist
-pnpm dev                                            # runs server + web together
-# or split:
-pnpm dev:server     # http://localhost:8765
-pnpm dev:web        # http://localhost:5173
+cp server/config.example.json server/config.json
+# edit config.json — add your project paths to the whitelist
+pnpm dev:server
+# server listening on http://0.0.0.0:8765
 ```
 
-### Mobile app
+### 3. Connect from the app
 
-```bash
-cd app
-flutter run                       # picks first available device
-# release build:
-./scripts/build-apk.sh            # interactive version bump + outputs APKs under build/.../releases/<version>/
-```
+Open PawTerm → **Add connection** → enter your machine's IP:
 
-On Android emulator the host machine is `http://10.0.2.2:8765`. On real devices use your
-machine's LAN IP, or its Tailscale `100.x.x.x` IP.
+| Network | Address |
+|---------|---------|
+| Same LAN | `http://192.168.x.x:8765` |
+| Tailscale | `http://100.x.x.x:8765` |
+| Android emulator | `http://10.0.2.2:8765` |
 
-## Configuration
+## Features
 
-`server/config.json` controls which directories the clients can access (whitelist). Anything
-outside these paths is rejected at the API layer.
+- **Chat** — full Claude conversation with streaming, thinking blocks, tool cards (Edit / Bash / Read / TodoWrite / …)
+- **Terminal** — real PTY shell via node-pty + xterm; virtual keyboard bar with common keys
+- **Sessions** — browse, resume, or start new Claude Code sessions per project
+- **File browser** — view, open, share files from your project directories
+- **Model switch** — swap between Opus / Sonnet / Haiku at runtime
+- **Todo tracking** — live task progress chip with fireworks on completion 🎉
+
+## Server config
+
+`server/config.json` whitelists which directories the app can access:
 
 ```json
 {
@@ -120,46 +75,23 @@ outside these paths is rejected at the API layer.
   "port": 8765,
   "permission_mode": "acceptEdits",
   "projects": [
-    { "name": "my-project",   "path": "~/code/my-project" },
-    { "name": "another-repo", "path": "~/code/another-repo" }
+    { "name": "my-project", "path": "~/code/my-project" }
   ]
 }
 ```
 
-Environment variables:
-
-| Var               | Default                              | Effect |
-|-------------------|--------------------------------------|--------|
-| `CC_CONFIG`       | `server/config.json`                 | Override config path |
-| `CC_LOG_FORMAT`   | `pretty` (dev) / `json` (prod)       | Log output format |
-| `CC_LOG_LEVEL`    | `info`                               | pino level |
-
-## Protocol
-
-All clients speak the same JSON protocol over WebSocket. Types live in
-[`packages/shared/src/protocol.ts`](packages/shared/src/protocol.ts). When changing the
-protocol, update three places: `protocol.ts`, `server/src/serialize.ts`, and
-`app/lib/api/protocol.dart` (the Dart side has no codegen).
-
-End-to-end tracing playbook: [`docs/debug-pipeline.md`](docs/debug-pipeline.md).
-
-## Building APKs
+## Build from source
 
 ```bash
+# Server
+pnpm install && pnpm dev:server
+
+# Android app
 cd app
-./scripts/build-apk.sh
+flutter pub get
+flutter run                  # debug on connected device
+./scripts/build-apk.sh       # versioned release APK
 ```
-
-Interactive menu: keep current version, bump build number, patch / minor / major.
-Outputs go to `app/build/app/outputs/flutter-apk/releases/<version>/`, with a
-`latest.apk` symlink in the parent directory for convenience.
-
-## Not yet implemented
-
-- Files tab — directory browser + "@ this file" composer integration
-- Git tab — diff / stage / commit on mobile
-- Permission UI — interactive `can_use_tool` prompts
-- File push from server to phone over Tailscale
 
 ## License
 

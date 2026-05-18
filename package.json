@@ -1,7 +1,7 @@
 {
-  "name": "claude-companion",
+  "name": "pawterm",
   "private": true,
-  "description": "Mobile + Web control surface for local Claude Code",
+  "description": "Mobile + Web control surface for AI coding assistants",
   "scripts": {
     "dev": "pnpm -r --parallel --filter=@cc/server --filter=@cc/web run dev",
     "dev:server": "pnpm --filter @cc/server run dev",
