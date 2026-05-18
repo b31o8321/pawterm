@@ -393,8 +393,8 @@ Widget? _tryParseCommandChip(String text) {
   if (trimmed.startsWith('<local-command-caveat>')) {
     return const SizedBox.shrink();
   }
-  // 6) SDK 写入的手动中断标记
-  if (trimmed == '[Request interrupted by user]') {
+  // 6) SDK 写入的手动中断标记（多个变体：by user / by user for tool use / …）
+  if (trimmed.startsWith('[Request interrupted by user')) {
     return const _InterruptedChip();
   }
   return null;

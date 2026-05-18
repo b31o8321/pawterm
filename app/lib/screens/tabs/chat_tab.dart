@@ -566,20 +566,21 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         setState(() => _loadingOlder = false);
         return;
       }
+      // 先插入消息，保持 spinner 可见（_loadingOlder 仍为 true），
+      // 下一帧 layout 完成后先恢复视口位置再隐藏 spinner——
+      // 这样 spinner 遮住了位置跳动的那一帧，过渡更平滑。
       setState(() {
         _messages.insertAll(0, page.messages);
         _oldestUuid = page.oldestUuid ?? _oldestUuid;
         _hasMoreHistory = page.hasMore;
-        _loadingOlder = false;
       });
-      // 等下一帧 layout 完，根据高度增量保持视口
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scrollController.hasClients) return;
-        final postMax = _scrollController.position.maxScrollExtent;
-        final delta = postMax - preMax;
-        if (delta > 0) {
-          _scrollController.jumpTo(preOffset + delta);
+        if (_scrollController.hasClients) {
+          final postMax = _scrollController.position.maxScrollExtent;
+          final delta = postMax - preMax;
+          if (delta > 0) _scrollController.jumpTo(preOffset + delta);
         }
+        if (mounted) setState(() => _loadingOlder = false);
       });
     } catch (_) {
       if (mounted) setState(() => _loadingOlder = false);
@@ -1094,7 +1095,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
                         ))
                   : Scrollbar(
                       controller: _scrollController,
-                      thumbVisibility: true,
+                      thumbVisibility: false,
                       thickness: 3,
                       radius: const Radius.circular(1.5),
                       child: ListView.builder(
