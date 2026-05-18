@@ -10,6 +10,23 @@ npx pawterm-server
 
 First run creates `~/.config/pawterm/config.json`. Edit it to add your project paths, then restart.
 
+## Run as a background service (macOS / Linux)
+
+```bash
+npm install -g pawterm-server
+pawterm-server install   # installs launchd agent (macOS) or systemd user unit (Linux)
+                         # auto-starts at login, logs to ~/.config/pawterm/server.log
+```
+
+Other service commands:
+
+```bash
+pawterm-server start     # start the background service
+pawterm-server stop      # stop it (does not uninstall)
+pawterm-server status    # check if running
+pawterm-server uninstall # remove the service entirely
+```
+
 ## Requirements
 
 - Node 20+

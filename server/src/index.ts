@@ -4,8 +4,9 @@ import websocketPlugin from '@fastify/websocket';
 import Fastify from 'fastify';
 import { createReadStream } from 'node:fs';
 import { mkdir, readdir, stat } from 'node:fs/promises';
-import { hostname, homedir } from 'node:os';
+import { hostname, homedir, networkInterfaces } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import qrcode from 'qrcode-terminal';
 
 import type { HealthResponse, Project } from '@pawterm/shared';
 
@@ -19,12 +20,33 @@ import { handleShellSocket } from './ws-shell.js';
 declare const __SERVER_VERSION__: string;
 const VERSION: string = __SERVER_VERSION__;
 
+function getLanIp(): string {
+  const ifaces = networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of (ifaces[name] ?? [])) {
+      if (!iface.internal && iface.family === 'IPv4') return iface.address;
+    }
+  }
+  return 'localhost';
+}
+
 async function main(): Promise<void> {
   const app = Fastify({ logger: buildLoggerOptions() });
 
   await app.register(cors, { origin: true });
   await app.register(websocketPlugin);
   await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024 } });
+
+  // Auth middleware — skip /health (LAN discovery) and /ws/shell (WS auth via init message)
+  app.addHook('onRequest', async (req, reply) => {
+    const url = req.url.split('?')[0];
+    if (url === '/health' || url === '/ws/shell') return;
+    const auth = req.headers['authorization'];
+    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    if (token !== settings.token) {
+      reply.code(401).send({ error: 'unauthorized' });
+    }
+  });
 
   // REST: health
   app.get('/health', async (): Promise<HealthResponse> => ({ status: 'ok', version: VERSION, hostname: hostname() }));
@@ -252,9 +274,27 @@ async function main(): Promise<void> {
       `└─ ready`,
     ].join('\n'),
   );
+
+  const lanIp = getLanIp();
+  const qrContent = `pawterm://${lanIp}:${settings.port}?token=${settings.token}`;
+  app.log.info(`\nScan QR to connect from the app:\n  ${qrContent}\n`);
+  await new Promise<void>((resolve) => {
+    qrcode.generate(qrContent, { small: true }, (code) => {
+      process.stdout.write(code + '\n');
+      resolve();
+    });
+  });
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const SERVICE_CMDS = new Set(['install', 'uninstall', 'start', 'stop', 'status']);
+const subcommand = process.argv[2];
+
+if (subcommand && SERVICE_CMDS.has(subcommand)) {
+  const { runServiceCommand } = await import('./service.js');
+  runServiceCommand(subcommand);
+} else {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
