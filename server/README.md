@@ -18,14 +18,18 @@ pawterm-server install   # installs launchd agent (macOS) or systemd user unit (
                          # auto-starts at login, logs to ~/.config/pawterm/server.log
 ```
 
-Other service commands:
-
-```bash
-pawterm-server start     # start the background service
-pawterm-server stop      # stop it (does not uninstall)
-pawterm-server status    # check if running
-pawterm-server uninstall # remove the service entirely
-```
+| Command | Description |
+|---|---|
+| `install` | Install and start as a background service |
+| `uninstall` | Remove the background service |
+| `start` | Start the service |
+| `stop` | Stop the service |
+| `restart` | Restart the service |
+| `status` | Show whether the service is running |
+| `update` | Update to latest version and restart |
+| `logs [n]` | Tail service logs (default: last 50 lines) |
+| `--version` | Print installed version |
+| `help` | Show all commands |
 
 ## Requirements
 
