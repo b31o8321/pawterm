@@ -183,11 +183,17 @@ RELEASE_FILES=("$ARM64")
 [[ -f "$ARMEABI" ]] && RELEASE_FILES+=("$ARMEABI")
 [[ -f "$X86_64"  ]] && RELEASE_FILES+=("$X86_64")
 
+# Read server version from server/package.json
+REPO_ROOT="$(dirname "$APP_DIR")"
+SERVER_VERSION=$(python3 -c "import json,sys; print(json.load(open('$REPO_ROOT/server/package.json'))['version'])" 2>/dev/null || echo "")
+RELEASE_TITLE="$TAG"
+[[ -n "$SERVER_VERSION" ]] && RELEASE_TITLE="$TAG  ·  server v$SERVER_VERSION"
+
 echo
-echo "▶ gh release create $TAG"
+echo "▶ gh release create $TAG  (title: $RELEASE_TITLE)"
 gh release create "$TAG" \
   "${RELEASE_FILES[@]}" \
-  --title "$TAG" \
+  --title "$RELEASE_TITLE" \
   --generate-notes
 
 echo
