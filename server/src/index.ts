@@ -289,7 +289,10 @@ async function main(): Promise<void> {
 const SERVICE_CMDS = new Set(['install', 'uninstall', 'start', 'stop', 'status']);
 const subcommand = process.argv[2];
 
-if (subcommand && SERVICE_CMDS.has(subcommand)) {
+if (subcommand === '--version' || subcommand === '-v') {
+  console.log(`pawterm-server ${VERSION}`);
+  process.exit(0);
+} else if (subcommand && SERVICE_CMDS.has(subcommand)) {
   const { runServiceCommand } = await import('./service.js');
   runServiceCommand(subcommand);
 } else {

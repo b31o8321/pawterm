@@ -42,3 +42,6 @@ if (!root) {
 
 const prebuilds = path.join(root, 'prebuilds');
 chmodExecRecursive(prebuilds);
+
+const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+console.log(`\n✓ pawterm-server@${pkg.version} installed\n`);
