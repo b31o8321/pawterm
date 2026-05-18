@@ -208,7 +208,7 @@ List<_Question> _parseQuestions(Map<String, dynamic> input) {
   final list = (input['questions'] as List?) ?? [];
   return list.map((q) {
     final m = q as Map<String, dynamic>;
-    final opts = (m['options'] as List).map((o) {
+    final opts = ((m['options'] as List?) ?? []).map((o) {
       final om = o as Map<String, dynamic>;
       return _Option(
         label: om['label'] as String,
