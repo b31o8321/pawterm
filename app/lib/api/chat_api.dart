@@ -2,20 +2,50 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-/// Turn state reported by GET /chat/:uuid/status
+/// A Claude CLI process currently holding (writing to) a session.
+class SessionHolder {
+  final int pid;
+  final String cwd;
+  final int startedAt;
+  final String? kind;
+
+  const SessionHolder({
+    required this.pid,
+    required this.cwd,
+    required this.startedAt,
+    this.kind,
+  });
+
+  factory SessionHolder.fromJson(Map<String, dynamic> json) => SessionHolder(
+        pid: (json['pid'] as num).toInt(),
+        cwd: json['cwd'] as String? ?? '',
+        startedAt: (json['startedAt'] as num?)?.toInt() ?? 0,
+        kind: json['kind'] as String?,
+      );
+}
+
+/// Run state reported by GET /chat/status?uuid=
 enum TurnState { live, done, running, unknown }
 
 class TurnStatus {
   final TurnState state;
-  TurnStatus(this.state);
+  /// Only present when state == running.
+  final SessionHolder? holder;
+
+  TurnStatus(this.state, {this.holder});
+
   factory TurnStatus.fromJson(Map<String, dynamic> j) {
     final s = j['state'] as String? ?? 'unknown';
-    return TurnStatus(switch (s) {
-      'live' => TurnState.live,
-      'done' => TurnState.done,
-      'running' => TurnState.running,
-      _ => TurnState.unknown,
-    });
+    final h = j['holder'] as Map<String, dynamic>?;
+    return TurnStatus(
+      switch (s) {
+        'live' => TurnState.live,
+        'done' => TurnState.done,
+        'running' => TurnState.running,
+        _ => TurnState.unknown,
+      },
+      holder: h != null ? SessionHolder.fromJson(h) : null,
+    );
   }
 }
 
@@ -27,16 +57,16 @@ class ChatApiException implements Exception {
   String toString() => 'ChatApiException($status): $message';
 }
 
-/// REST 客户端：与 chat-rest.ts 一一对应。
-/// SSE 事件流是另一条 socket（见 SseClient），不在此类中处理。
+/// REST client — mirrors chat-rest.ts endpoints.
+/// SSE stream is handled separately via SseClient.
 class ChatApi {
   final String httpBase;
   ChatApi(this.httpBase);
 
-  /// Start a new turn: send first message, optionally specifying model/permission.
-  /// [uuid] is the Claude session UUID (client-generated for new sessions, or
-  /// the existing resumeId for existing sessions).
-  Future<void> turn({
+  /// Send a message and start streaming the response.
+  /// Events arrive via GET /chat/events?uuid= (SseClient).
+  /// Throws [ChatApiException] with status 409 if a run is already active.
+  Future<void> stream({
     required String uuid,
     required String cwd,
     required String text,
@@ -44,9 +74,10 @@ class ChatApi {
     String? permissionMode,
   }) async {
     final resp = await http.post(
-      Uri.parse('$httpBase/chat/$uuid/turn'),
+      Uri.parse('$httpBase/chat/stream'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
+        'uuid': uuid,
         'cwd': cwd,
         'text': text,
         if (model != null) 'model': model,
@@ -54,31 +85,38 @@ class ChatApi {
       }),
     );
     if (resp.statusCode == 409) {
-      throw ChatApiException(409, 'turn already active');
+      throw ChatApiException(409, 'run already active');
     }
     if (resp.statusCode != 200) {
       throw ChatApiException(resp.statusCode, resp.body);
     }
   }
 
+  /// Returns the SSE URL to pass to SseClient for the given session.
+  Uri eventsUrl(String uuid) =>
+      Uri.parse('$httpBase/chat/events').replace(queryParameters: {'uuid': uuid});
+
+  /// Check run state: live / done / running / unknown.
   Future<TurnStatus> status(String uuid) async {
     final resp = await http
-        .get(Uri.parse('$httpBase/chat/$uuid/status'))
+        .get(Uri.parse('$httpBase/chat/status?uuid=${Uri.encodeQueryComponent(uuid)}'))
         .timeout(const Duration(seconds: 4));
     if (resp.statusCode != 200) return TurnStatus(TurnState.unknown);
     return TurnStatus.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
   }
 
-  Future<void> answerQuestion(
+  /// Answer a pending AskUserQuestion tool call.
+  Future<void> answer(
     String uuid,
     String toolUseId,
     Map<String, String> answers,
     Map<String, Map<String, String>>? annotations,
   ) async {
     final resp = await http.post(
-      Uri.parse('$httpBase/chat/$uuid/answer-question'),
+      Uri.parse('$httpBase/chat/answer'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
+        'uuid': uuid,
         'tool_use_id': toolUseId,
         'answers': answers,
         if (annotations != null) 'annotations': annotations,
@@ -89,27 +127,43 @@ class ChatApi {
     }
   }
 
+  /// Interrupt the active run.
   Future<void> interrupt(String uuid) async {
-    await http.post(Uri.parse('$httpBase/chat/$uuid/interrupt'));
-  }
-
-  Future<void> setModel(String uuid, String model) async {
     await http.post(
-      Uri.parse('$httpBase/chat/$uuid/set-model'),
+      Uri.parse('$httpBase/chat/interrupt'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'model': model}),
+      body: jsonEncode({'uuid': uuid}),
     );
   }
 
-  Future<void> setPermissionMode(String uuid, String mode) async {
+  /// Change model mid-run.
+  Future<void> model(String uuid, String modelId) async {
     await http.post(
-      Uri.parse('$httpBase/chat/$uuid/set-permission-mode'),
+      Uri.parse('$httpBase/chat/model'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'mode': mode}),
+      body: jsonEncode({'uuid': uuid, 'model': modelId}),
     );
   }
 
-  Future<void> close(String uuid) async {
-    await http.delete(Uri.parse('$httpBase/chat/$uuid'));
+  /// Change permission mode mid-run.
+  Future<void> permission(String uuid, String mode) async {
+    await http.post(
+      Uri.parse('$httpBase/chat/permission'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'uuid': uuid, 'mode': mode}),
+    );
+  }
+
+  /// Kill the holder process for a session so this client can take over.
+  /// Throws [ChatApiException] with status 409 if the holder could not be stopped.
+  Future<void> takeover(String uuid) async {
+    final resp = await http.post(
+      Uri.parse('$httpBase/chat/takeover'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'uuid': uuid}),
+    );
+    if (resp.statusCode != 200) {
+      throw ChatApiException(resp.statusCode, resp.body);
+    }
   }
 }

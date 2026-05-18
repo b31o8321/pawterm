@@ -50,10 +50,11 @@ export type ToolResultContent =
   | Array<{ type: 'text'; text: string } | { type: string; [k: string]: unknown }>
   | null;
 
-// ============== Chat REST: POST /chat/<id>/answer-question ==============
+// ============== Chat REST: POST /chat/answer ==============
 
-/** POST /chat/<id>/answer-question 请求 body */
+/** POST /chat/answer 请求 body */
 export interface AnswerQuestionRequest {
+  uuid: string;
   tool_use_id: string;
   answers: Record<string, string>;
   annotations?: Record<string, { preview?: string; notes?: string }>;

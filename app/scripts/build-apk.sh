@@ -177,21 +177,18 @@ fi
 
 TAG="v${VERSION%%+*}"
 ARMEABI="$VERSION_DIR/pawterm-${VERSION}-armeabi-v7a.apk"
+X86_64="$VERSION_DIR/pawterm-${VERSION}-x86_64.apk"
+
+RELEASE_FILES=("$ARM64")
+[[ -f "$ARMEABI" ]] && RELEASE_FILES+=("$ARMEABI")
+[[ -f "$X86_64"  ]] && RELEASE_FILES+=("$X86_64")
 
 echo
 echo "▶ gh release create $TAG"
-if [[ -f "$ARMEABI" ]]; then
-  gh release create "$TAG" \
-    "$ARM64#pawterm-${VERSION}-arm64-v8a.apk (推荐)" \
-    "$ARMEABI#pawterm-${VERSION}-armeabi-v7a.apk (旧机型)" \
-    --title "$TAG" \
-    --generate-notes
-else
-  gh release create "$TAG" \
-    "$ARM64#pawterm-${VERSION}-arm64-v8a.apk" \
-    --title "$TAG" \
-    --generate-notes
-fi
+gh release create "$TAG" \
+  "${RELEASE_FILES[@]}" \
+  --title "$TAG" \
+  --generate-notes
 
 echo
 echo "\033[32m✓ released\033[0m  https://github.com/Airoucat233/pawterm/releases/tag/$TAG"

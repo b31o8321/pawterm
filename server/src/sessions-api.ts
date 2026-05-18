@@ -14,10 +14,9 @@ import type { FastifyInstance } from 'fastify';
 import type { SessionSummary } from '@cc/shared';
 
 import { isPathAllowed } from './config.js';
-import { findHolder } from './holder-detect.js';
 import { messageToWire } from './serialize.js';
 
-import { readFile, access, readdir } from 'node:fs/promises';
+import { readFile, access, readdir, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -59,6 +58,32 @@ async function resolveJsonlPath(uuid: string, cwd: string): Promise<string | nul
       }
     }
     return null;
+  }
+}
+
+// Mirror the SDK's LITE_READ_BUF_SIZE (sessionStoragePortable.ts).
+const LITE_READ_BUF_SIZE = 65536;
+
+/**
+ * Read the first 64KB of a session jsonl (same as the SDK's head read) and
+ * check whether any line contains `"isSidechain":true`.
+ *
+ * The SDK itself only checks the very first line, but sessions that start with
+ * queue-operation entries can have isSidechain on a later line. Reading the
+ * full head catches those. String-match (not JSON.parse) mirrors the SDK.
+ */
+async function isSidechainSession(filePath: string): Promise<boolean> {
+  let fd: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    fd = await open(filePath, 'r');
+    const buf = Buffer.allocUnsafe(LITE_READ_BUF_SIZE);
+    const { bytesRead } = await fd.read(buf, 0, LITE_READ_BUF_SIZE, 0);
+    const head = buf.subarray(0, bytesRead).toString('utf-8');
+    return head.includes('"isSidechain":true') || head.includes('"isSidechain": true');
+  } catch {
+    return false;
+  } finally {
+    await fd?.close().catch(() => {});
   }
 }
 
@@ -104,14 +129,22 @@ export async function registerSessionsApi(app: FastifyInstance): Promise<void> {
       all.push(...page);
       if (page.length < pageSize) break;
     }
-    const filtered = all.filter((s) => {
+    const byCwd = all.filter((s) => {
       const sCwd = s.cwd ?? '';
       if (!sCwd) return false;
       if (sCwd === cwd) return true;
       if (includeSubdirs && sCwd.startsWith(cwd + '/')) return true;
       return false;
     });
-    return filtered.slice(offset, offset + limit).map(toSummary);
+    // Filter out sidechain (sub-agent) sessions that leaked through SDK's first-line-only check.
+    const page = byCwd.slice(offset, offset + limit);
+    const result: SDKSessionInfo[] = [];
+    for (const s of page) {
+      const jsonlPath = await resolveJsonlPath(s.sessionId, s.cwd ?? cwd);
+      if (jsonlPath && await isSidechainSession(jsonlPath)) continue;
+      result.push(s);
+    }
+    return result.map(toSummary);
   });
 
   app.get<{ Params: { id: string }; Querystring: { cwd: string } }>(
@@ -126,19 +159,6 @@ export async function registerSessionsApi(app: FastifyInstance): Promise<void> {
       return info;
     },
   );
-
-  /**
-   * 检测 sessionId 是否正被某个 claude CLI 进程持有。
-   * 返回 { holder } —— 命中时 holder 是 { pid, cwd, startedAt, kind }，否则 null。
-   * 客户端在 resume 前先调一次，命中则提示用户「接管 / 只读」二选一。
-   *
-   * 没有 cwd 校验：持有者本身可能在别的目录里跑（用户走错路径开了 claude）；
-   * 不带 cwd 也能查得到，便于做"误开"提示。
-   */
-  app.get<{ Params: { id: string } }>('/sessions/:id/holder', async (req) => {
-    const holder = await findHolder(req.params.id);
-    return { holder };
-  });
 
   /**
    * Paginated session messages — reverse-infinite-scroll friendly.

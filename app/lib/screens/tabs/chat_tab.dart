@@ -12,7 +12,6 @@ import 'package:http/http.dart' as http;
 
 import '../../api/chat_api.dart';
 import '../../api/protocol.dart';
-import '../../api/sessions_api.dart';
 import '../../api/sse_client.dart';
 import '../../api/upload_api.dart';
 import '../../i18n/locale_provider.dart';
@@ -43,7 +42,7 @@ class _HistoryPage {
   const _HistoryPage({required this.messages, this.oldestUuid, required this.hasMore});
 }
 
-enum _HolderChoice { takeover, readOnly, cancel }
+enum _ConflictChoice { observe, takeover, cancel }
 
 enum _AttachmentStatus { uploading, ready, failed }
 
@@ -79,6 +78,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _connected = false;
+  bool _observeMode = false;
+  SessionHolder? _observeHolder;
+  Timer? _observeTimer;
   bool _busy = false;
   DateTime? _busyStartedAt;
   String? _error;
@@ -148,10 +150,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _thoughtForTimer?.cancel();
+    _observeTimer?.cancel();
     unawaited(_sseClient?.close() ?? Future.value());
-    if (_sessionId != null && _chatApi != null) {
-      unawaited(_chatApi!.close(_sessionId!));
-    }
     _textController.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -161,6 +161,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (_observeMode) return; // observe mode handles its own polling
       // After app comes back to foreground, force reconnect if SSE stream died.
       if (!_connected && _boundKey != null) {
         unawaited(_sseClient?.close() ?? Future.value());
@@ -174,8 +175,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     }
   }
 
-  String _sessionKey(CurrentSession s) =>
-      '${s.cwd}|${s.resumeId ?? "new"}|${s.readOnly ? "ro" : "rw"}';
+  String _sessionKey(CurrentSession s) => '${s.cwd}|${s.resumeId ?? "new"}';
 
   // Throttle session-start attempts so a dead server doesn't trigger a tight loop.
   // Once api.start() failed, only the user-visible "reconnect" button will retry.
@@ -186,18 +186,14 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   void _ensureConnected(CurrentSession session) {
     final key = _sessionKey(session);
-    if (_boundKey == key && (_sseClient != null || session.readOnly)) return;
-    if (_attempting) return; // connection attempt already in-flight
-    if (_attemptedKey == key) return; // already tried, don't auto-retry
+    if (_boundKey == key && (_sseClient != null || _connected || _observeMode)) return;
+    if (_attempting) return;
+    if (_attemptedKey == key) return;
 
-    // Tear down any prior SSE/REST session before binding to a new one.
+    // Tear down prior SSE and observe timer before binding to a new session.
     final priorSse = _sseClient;
-    final priorApi = _chatApi;
-    final priorId = _sessionId;
     if (priorSse != null) unawaited(priorSse.close());
-    if (priorId != null && priorApi != null) {
-      unawaited(priorApi.close(priorId));
-    }
+    _stopObserveTimer();
 
     _attempting = true;
     _attemptedKey = key;
@@ -210,6 +206,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _sessionId = null;
       _chatApi = null;
       _connected = false;
+      _observeMode = false;
+      _observeHolder = null;
       _busy = false;
       _error = null;
       _boundKey = key;
@@ -218,7 +216,6 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _loadingOlder = false;
       _loadingHistory = false;
     });
-    // 切换会话时清空之前的 todo（每个 session 各自一份）
     ref.read(todoListProvider.notifier).clear();
 
     final config = ref.read(activeConnectionProvider);
@@ -227,116 +224,31 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
 
-    // 只读模式：完全不开传输层，仅通过 HTTP 翻历史。
-    if (session.readOnly && session.resumeId != null) {
-      _attempting = false;
-      _loadHistory(config.httpBase, session.cwd, session.resumeId!);
-      return;
-    }
-
-    // 普通 resume：先看是否被其他 CLI 进程持有；命中则把决定权交给用户。
-    if (session.resumeId != null) {
-      _resumeWithHolderCheck(config.httpBase, session);
-    } else {
-      _connectToSession(config.httpBase, session);
-    }
+    unawaited(_connectToSession(config.httpBase, session));
   }
 
-  /// Resume 前先 GET /sessions/:id/holder。
-  /// - 没人持有：直接打开 ws。
-  /// - 有持有者：弹窗让用户选「接管」或「只读」。
-  ///   - 接管：照常打开 ws（jsonl 会出现两条分叉，但服务端目前没办法 kill 远端 CLI；
-  ///     这一步主要是把"明知有冲突"这个状态显式化）。
-  ///   - 只读：把 currentSession 切到 readOnly=true 重新走一遍 _ensureConnected。
-  Future<void> _resumeWithHolderCheck(
+  /// 处理会话冲突（另一个 CLI 进程持有该会话）。
+  /// 弹窗让用户选择：旁观、接管、或取消。
+  Future<void> _handleConflict(
     String httpBase,
     CurrentSession session,
+    String uuid,
+    SessionHolder holder,
   ) async {
-    SessionHolder? holder;
-    try {
-      holder = await SessionsApi(httpBase).holder(session.resumeId!);
-    } catch (_) {
-      // 检测失败不阻塞使用，按"没人持有"继续。
-      holder = null;
-    }
+    final choice = await _showConflictDialog(holder);
     if (!mounted) return;
-    if (holder == null) {
-      _connectToSession(httpBase, session);
-      return;
-    }
-    // 弹窗
-    final choice = await _showHolderDialog(holder);
-    if (!mounted) return;
-    if (choice == _HolderChoice.readOnly) {
-      // 切到只读再走一遍：_attemptedKey 也要跟着更新避免被去重。
-      _attemptedKey = null;
-      ref.read(currentSessionProvider.notifier).state =
-          session.copyWith(readOnly: true);
-      return;
-    }
-    if (choice == _HolderChoice.takeover) {
-      _connectToSession(httpBase, session);
-      return;
-    }
-    // 取消 / 关闭对话框：什么都不做，停留在空白态。
-    _attempting = false;
-  }
-
-  /// 建立到会话的连接。为新建会话生成 UUID，为已有会话使用 resumeId。
-  /// 仅建立 SSE 连接（如果 turn 已活跃）或等待用户发消息触发 turn。
-  Future<void> _connectToSession(String httpBase, CurrentSession session) async {
-    // History first — 让用户在传输建立期间就能看到历史消息。
-    if (session.resumeId != null) {
-      _loadHistory(httpBase, session.cwd, session.resumeId!);
-    }
-
-    final uuid = session.resumeId ?? const Uuid().v4();
-    _sessionId = uuid;
-
-    // 持久化 UUID（新建会话时尤其重要）
-    unawaited(_persistUuid(uuid));
-
-    final api = ChatApi(httpBase);
-    _chatApi = api;
-
-    // 检查是否有活跃 turn（服务端正在运行）。
-    TurnStatus turnStatus;
-    try {
-      turnStatus = await api.status(uuid);
-    } catch (_) {
-      turnStatus = TurnStatus(TurnState.unknown);
-    }
-
-    if (!mounted) return;
-
-    setState(() {
-      _attempting = false;
-      _error = null;
-    });
-
-    if (turnStatus.state == TurnState.live) {
-      // 已有活跃 turn → 连接 SSE 接收输出
-      setState(() {
-        _connected = true;
-        _busy = true;
-        _busyStartedAt ??= DateTime.now();
-      });
-      _subscribeSse(httpBase, uuid);
-    } else {
-      // 空闲 → 标记为 connected，等用户发消息
-      setState(() => _connected = true);
+    switch (choice) {
+      case _ConflictChoice.observe:
+        _startObserveMode(httpBase, session, uuid, holder);
+      case _ConflictChoice.takeover:
+        unawaited(_doTakeover(httpBase, session, uuid));
+      case null:
+      case _ConflictChoice.cancel:
+        setState(() => _attempting = false);
     }
   }
 
-  void _subscribeSse(String httpBase, String uuid) {
-    final sseUrl = Uri.parse('$httpBase/chat/$uuid/events');
-    final sse = SseClient(url: sseUrl);
-    _sseClient = sse;
-    sse.events.listen(_onSseEvent);
-    unawaited(sse.connect());
-  }
-
-  Future<_HolderChoice?> _showHolderDialog(SessionHolder holder) async {
+  Future<_ConflictChoice?> _showConflictDialog(SessionHolder holder) async {
     final t = AppTokens.of(context);
     final fmt = DateTime.fromMillisecondsSinceEpoch(holder.startedAt);
     final ago = DateTime.now().difference(fmt);
@@ -347,11 +259,11 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             : ago.inDays < 1
                 ? '${ago.inHours} 小时前'
                 : '${ago.inDays} 天前';
-    return showDialog<_HolderChoice>(
+    return showDialog<_ConflictChoice>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: t.surface,
-        title: Text('该会话正被另一个 Claude 进程使用',
+        title: Text('会话正被另一个 Claude 进程使用',
             style: TextStyle(color: t.text, fontSize: 15, fontWeight: FontWeight.w600)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -362,28 +274,163 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             if (holder.cwd.isNotEmpty) _kv('cwd', holder.cwd, t),
             const SizedBox(height: 10),
             Text(
-              '继续写入可能导致历史分叉、消息互相不可见。建议先关闭那个终端再回来；'
-              '或选择「只读」翻阅历史。',
+              '旁观：静默跟随对话进展，可随时一键接管。\n接管：终止对端进程，本端取得控制权。',
               style: TextStyle(color: t.textMuted, fontSize: 12, height: 1.5),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(_HolderChoice.cancel),
+            onPressed: () => Navigator.of(ctx).pop(_ConflictChoice.cancel),
             child: Text('取消', style: TextStyle(color: t.textMuted)),
           ),
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(_HolderChoice.takeover),
-            child: Text('仍然接管', style: TextStyle(color: t.error)),
+            onPressed: () => Navigator.of(ctx).pop(_ConflictChoice.observe),
+            child: Text('旁观', style: TextStyle(color: t.accent, fontWeight: FontWeight.w600)),
           ),
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(_HolderChoice.readOnly),
-            child: Text('只读查看', style: TextStyle(color: t.accent, fontWeight: FontWeight.w600)),
+            onPressed: () => Navigator.of(ctx).pop(_ConflictChoice.takeover),
+            child: Text('接管', style: TextStyle(color: t.error)),
           ),
         ],
       ),
     );
+  }
+
+  void _startObserveMode(
+    String httpBase,
+    CurrentSession session,
+    String uuid,
+    SessionHolder holder,
+  ) {
+    setState(() {
+      _observeMode = true;
+      _observeHolder = holder;
+    });
+    _stopObserveTimer();
+    _observeTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (!mounted) return;
+      // Check if the holder is still running.
+      try {
+        final status = await _chatApi?.status(uuid);
+        if (!mounted) return;
+        if (status != null && status.state != TurnState.running) {
+          _stopObserveTimer();
+          if (!mounted) return;
+          setState(() {
+            _observeMode = false;
+            _observeHolder = null;
+          });
+          unawaited(_connectToSession(httpBase, session));
+          return;
+        }
+      } catch (_) {}
+      // Silently refresh messages.
+      try {
+        final page = await _fetchHistoryPage(
+          httpBase, session.cwd, uuid,
+          limit: _historyPageSize,
+        );
+        if (!mounted || page == null) return;
+        if (page.messages.length != _messages.length) {
+          setState(() {
+            _messages
+              ..clear()
+              ..addAll(page.messages);
+            _oldestUuid = page.oldestUuid;
+            _hasMoreHistory = page.hasMore;
+          });
+          _scrollToEnd();
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _stopObserveTimer() {
+    _observeTimer?.cancel();
+    _observeTimer = null;
+  }
+
+  Future<void> _doTakeover(String httpBase, CurrentSession session, String uuid) async {
+    try {
+      await _chatApi!.takeover(uuid);
+    } catch (e) {
+      if (mounted) setState(() => _error = '接管失败: $e');
+      return;
+    }
+    if (!mounted) return;
+    unawaited(_connectToSession(httpBase, session));
+  }
+
+  void _takeoverFromObserve() {
+    final config = ref.read(activeConnectionProvider);
+    final session = ref.read(currentSessionProvider);
+    if (config == null || session == null || _sessionId == null || _chatApi == null) return;
+    final uuid = _sessionId!;
+    _stopObserveTimer();
+    setState(() {
+      _observeMode = false;
+      _observeHolder = null;
+    });
+    unawaited(_doTakeover(config.httpBase, session, uuid));
+  }
+
+  /// 建立到会话的连接。为新建会话生成 UUID，为已有会话使用 resumeId。
+  /// 根据 /chat/status 结果决定：直连 SSE（live）、等待发消息（idle）或进入冲突处理（running）。
+  Future<void> _connectToSession(String httpBase, CurrentSession session) async {
+    if (session.resumeId != null) {
+      _loadHistory(httpBase, session.cwd, session.resumeId!);
+    }
+
+    final uuid = session.resumeId ?? const Uuid().v4();
+    _sessionId = uuid;
+    unawaited(_persistUuid(uuid));
+
+    final api = ChatApi(httpBase);
+    _chatApi = api;
+
+    TurnStatus turnStatus;
+    try {
+      turnStatus = await api.status(uuid);
+    } catch (_) {
+      turnStatus = TurnStatus(TurnState.unknown);
+    }
+
+    if (!mounted) return;
+
+    if (turnStatus.state == TurnState.running) {
+      final holder = turnStatus.holder;
+      setState(() => _attempting = false);
+      if (holder != null) {
+        unawaited(_handleConflict(httpBase, session, uuid, holder));
+      } else {
+        // No holder detail — treat as idle.
+        setState(() { _connected = true; _error = null; });
+      }
+      return;
+    }
+
+    setState(() {
+      _attempting = false;
+      _connected = true;
+      _error = null;
+      if (turnStatus.state == TurnState.live) {
+        _busy = true;
+        _busyStartedAt ??= DateTime.now();
+      }
+    });
+
+    if (turnStatus.state == TurnState.live) {
+      _subscribeSse(httpBase, uuid);
+    }
+  }
+
+  void _subscribeSse(String httpBase, String uuid) {
+    final sseUrl = ChatApi(httpBase).eventsUrl(uuid);
+    final sse = SseClient(url: sseUrl);
+    _sseClient = sse;
+    sse.events.listen(_onSseEvent);
+    unawaited(sse.connect());
   }
 
   Widget _kv(String k, String v, AppTokens t) => Padding(
@@ -405,14 +452,14 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   void _switchModel(ModelOption m) {
     ref.read(currentModelProvider.notifier).state = m;
     if (_sessionId != null && _chatApi != null) {
-      unawaited(_chatApi!.setModel(_sessionId!, m.id));
+      unawaited(_chatApi!.model(_sessionId!, m.id));
     }
   }
 
   void _switchPermissionMode(CcPermissionMode m) {
     ref.read(permissionModeProvider.notifier).set(m);
     if (_sessionId != null && _chatApi != null) {
-      unawaited(_chatApi!.setPermissionMode(_sessionId!, m.wire));
+      unawaited(_chatApi!.permission(_sessionId!, m.wire));
     }
   }
 
@@ -548,13 +595,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 
   void _manualReconnect() {
+    _stopObserveTimer();
     final priorSse = _sseClient;
-    final priorApi = _chatApi;
-    final priorId = _sessionId;
     if (priorSse != null) unawaited(priorSse.close());
-    if (priorId != null && priorApi != null) {
-      unawaited(priorApi.close(priorId));
-    }
     setState(() {
       _sseClient = null;
       _sessionId = null;
@@ -563,6 +606,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       _attemptedKey = null;
       _attempting = false;
       _error = null;
+      _observeMode = false;
+      _observeHolder = null;
     });
   }
 
@@ -832,7 +877,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     if (uuid != null && _chatApi != null && config != null && session != null) {
       final model = ref.read(currentModelProvider);
       final permMode = ref.read(permissionModeProvider);
-      unawaited(_chatApi!.turn(
+      unawaited(_chatApi!.stream(
         uuid: uuid,
         cwd: session.cwd,
         text: text,
@@ -881,7 +926,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     Map<String, Map<String, String>>? annotations,
   ) {
     if (_sessionId == null || _chatApi == null) return;
-    unawaited(_chatApi!.answerQuestion(_sessionId!, toolUseId, answers, annotations));
+    unawaited(_chatApi!.answer(_sessionId!, toolUseId, answers, annotations));
   }
 
   /// 弹文件选择器，把每个选中的文件都登记为 uploading 状态并启动并发上传。
@@ -974,13 +1019,10 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
     return Column(
       children: [
-        if (session.readOnly)
-          _ReadOnlyBanner(
-            onExit: () {
-              _attemptedKey = null;
-              ref.read(currentSessionProvider.notifier).state =
-                  session.copyWith(readOnly: false);
-            },
+        if (_observeMode && _observeHolder != null)
+          _ObserveBanner(
+            holder: _observeHolder!,
+            onTakeover: _takeoverFromObserve,
           )
         else
           _StatusRow(
@@ -995,11 +1037,13 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           child: Stack(
             children: [
               _messages.isEmpty
-                  ? (_loadingHistory
+                  ? (_loadingHistory && !_observeMode
                       ? const _ChatSkeleton()
                       : _EmptyState(
                           icon: Icons.send_outlined,
-                          title: _connected ? s.chatStartTalking : s.chatConnecting,
+                          title: _observeMode
+                              ? '旁观中…'
+                              : (_connected ? s.chatStartTalking : s.chatConnecting),
                         ))
                   : ListView.builder(
                       controller: _scrollController,
@@ -1072,7 +1116,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             onRemove: _removePending,
           ),
         Divider(color: t.borderSubt, height: 0.5, thickness: 0.5),
-        if (!session.readOnly)
+        if (!_observeMode)
           _Composer(
             controller: _textController,
             connected: _connected,
@@ -1092,40 +1136,52 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   }
 }
 
-class _ReadOnlyBanner extends StatelessWidget {
-  final VoidCallback onExit;
-  const _ReadOnlyBanner({required this.onExit});
+class _ObserveBanner extends StatelessWidget {
+  final SessionHolder holder;
+  final VoidCallback onTakeover;
+  const _ObserveBanner({required this.holder, required this.onTakeover});
 
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final ago = DateTime.now().difference(
+        DateTime.fromMillisecondsSinceEpoch(holder.startedAt));
+    final agoStr = ago.inMinutes < 1
+        ? '刚刚'
+        : ago.inHours < 1
+            ? '${ago.inMinutes} 分钟前'
+            : '${ago.inHours} 小时前';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       color: t.surfaceHi,
       child: Row(
         children: [
-          Icon(Icons.visibility_outlined, size: 14, color: t.textMuted),
+          Icon(Icons.visibility_outlined, size: 14, color: t.warning),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '只读模式：会话被另一个 Claude 进程持有，仅展示历史',
+              '旁观中 · PID ${holder.pid} · $agoStr',
               style: TextStyle(fontSize: 12, color: t.textMuted),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          InkWell(
-            onTap: onExit,
-            borderRadius: BorderRadius.circular(4),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          GestureDetector(
+            onTap: onTakeover,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: t.error.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                    color: t.error.withValues(alpha: 0.3), width: 0.5),
+              ),
               child: Text(
-                '重新连接',
+                '接管',
                 style: TextStyle(
-                  fontSize: 11,
-                  color: t.accent,
-                  fontWeight: FontWeight.w500,
-                ),
+                    fontSize: 11,
+                    color: t.error,
+                    fontWeight: FontWeight.w600),
               ),
             ),
           ),

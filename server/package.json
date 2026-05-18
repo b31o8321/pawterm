@@ -1,17 +1,22 @@
 {
-  "name": "@cc/server",
-  "version": "0.0.1",
-  "private": true,
+  "name": "pawterm-server",
+  "version": "0.3.0",
   "type": "module",
+  "bin": {
+    "pawterm-server": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "CC_CONFIG=$(pwd)/config.json tsx watch src/index.ts",
     "dev:test": "CC_CONFIG=$(pwd)/config.test.json tsx src/index.ts",
     "test-server:start": "./scripts/test-server.sh start",
     "test-server:stop": "./scripts/test-server.sh stop",
     "test-server:restart": "./scripts/test-server.sh restart",
     "test-server:status": "./scripts/test-server.sh status",
     "test-server:logs": "./scripts/test-server.sh logs",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsup",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -31,6 +36,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "pino-pretty": "^11.3.0",
+    "tsup": "^8.5.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.2",
     "vitest": "^4.1.6"

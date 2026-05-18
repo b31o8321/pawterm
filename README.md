@@ -7,22 +7,7 @@
 ![Flutter](https://img.shields.io/badge/Flutter-Android-02569B?logo=flutter&logoColor=white)
 ![Node](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 
-## What it is
-
-A small bridge server runs on your dev machine (where `claude` CLI is installed). The Android app connects to it over your LAN or Tailscale and gives you a full mobile interface: chat, real terminal, session history, file browser.
-
-```
-  Your Mac / Linux box
-  ┌────────────────────────────────┐
-  │  PawTerm Server  :8765         │
-  │  Claude Code CLI               │
-  └──────────────┬─────────────────┘
-                 │ WebSocket (LAN / Tailscale)
-          ┌──────▼──────┐
-          │ PawTerm App │
-          │   Android   │
-          └─────────────┘
-```
+A small bridge server runs on your dev machine (where `claude` CLI is installed). The Android app connects over LAN or Tailscale and gives you a full mobile interface: chat, real terminal, session history, file browser.
 
 ## Install
 
@@ -32,19 +17,17 @@ Grab the latest `pawterm-*-arm64-v8a.apk` from [**Releases**](../../releases/lat
 
 > Enable **"Install unknown apps"** in Android settings if prompted.
 
-### 2. Run the server on your dev machine
+### 2. Start the server
 
 Requires Node 20+ and `claude` CLI logged in.
 
 ```bash
-git clone https://github.com/airoucat/pawterm.git
-cd pawterm
-pnpm install
-cp server/config.example.json server/config.json
-# edit config.json — add your project paths to the whitelist
-pnpm dev:server
-# server listening on http://0.0.0.0:8765
+npx pawterm-server
 ```
+
+First run will create `~/.config/pawterm/config.json` — edit it to add your project paths, then restart.
+
+> **Manual setup:** `git clone` + `pnpm dev:server` also works — see [Build from source](#build-from-source).
 
 ### 3. Connect from the app
 
@@ -67,7 +50,7 @@ Open PawTerm → **Add connection** → enter your machine's IP:
 
 ## Server config
 
-`server/config.json` whitelists which directories the app can access:
+`~/.config/pawterm/config.json` whitelists which directories the app can access:
 
 ```json
 {
@@ -84,7 +67,10 @@ Open PawTerm → **Add connection** → enter your machine's IP:
 
 ```bash
 # Server
-pnpm install && pnpm dev:server
+git clone https://github.com/Airoucat233/pawterm.git
+cd pawterm && pnpm install
+cp server/config.example.json server/config.json
+pnpm dev:server
 
 # Android app
 cd app

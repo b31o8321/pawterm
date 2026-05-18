@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, resolve, relative } from 'node:path';
@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import type { Project, PermissionMode } from '@cc/shared';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const DEFAULT_CONFIG_DIR = resolve(homedir(), '.config', 'pawterm');
+const DEFAULT_CONFIG_PATH = resolve(DEFAULT_CONFIG_DIR, 'config.json');
 
 export interface ServerSettings {
   host: string;
@@ -21,16 +24,27 @@ function expandHome(p: string): string {
   return resolve(p);
 }
 
-export const configPath = process.env.CC_CONFIG ?? resolve(__dirname, '..', 'config.json');
+export const configPath = process.env.CC_CONFIG ?? DEFAULT_CONFIG_PATH;
 
 function loadConfig(): ServerSettings {
   if (!existsSync(configPath)) {
-    console.warn(`[config] No config.json at ${configPath} — defaulting to $HOME`);
-    return {
+    const defaultConfig = {
       host: '0.0.0.0',
       port: 8765,
+      permission_mode: 'bypassPermissions',
+      projects: [] as Array<{ name: string; path: string }>,
+    };
+    try {
+      mkdirSync(DEFAULT_CONFIG_DIR, { recursive: true });
+      writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2));
+      console.info(`[config] Created default config at ${configPath}`);
+      console.info(`[config] Edit it to add your project paths, then restart.`);
+    } catch { /* ignore write errors (e.g. read-only fs) */ }
+    return {
+      host: defaultConfig.host,
+      port: defaultConfig.port,
       permissionMode: 'bypassPermissions',
-      projects: [{ name: 'home', path: homedir() }],
+      projects: [],
     };
   }
 

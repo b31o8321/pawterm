@@ -34,6 +34,20 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
+/** 向持有者进程发 SIGTERM，等待最多 3s 退出。成功返回 true，超时返回 false。 */
+export async function killHolder(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return true; // already gone
+  }
+  for (let i = 0; i < 30; i++) {
+    await new Promise<void>((r) => setTimeout(r, 100));
+    if (!isProcessRunning(pid)) return true;
+  }
+  return false;
+}
+
 /** 返回该 sessionId 当前的持有者（活进程）；没有则 null。 */
 export async function findHolder(sessionId: string): Promise<SessionHolder | null> {
   let files: string[];
