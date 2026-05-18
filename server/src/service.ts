@@ -130,6 +130,8 @@ export function runServiceCommand(cmd: string): void {
   if (cmd === 'start') {
     if (p === 'darwin') {
       if (!existsSync(PLIST_PATH)) { console.error('Service not installed. Run: pawterm-server install'); process.exit(1); }
+      const running = spawnSync('launchctl', ['list', LABEL], { encoding: 'utf-8' });
+      if (running.status === 0) { console.log('Service is already running.'); return; }
       exec(`launchctl load "${PLIST_PATH}"`);
       console.log('✓ Service started');
     } else if (p === 'linux') {
@@ -144,6 +146,8 @@ export function runServiceCommand(cmd: string): void {
   if (cmd === 'stop') {
     if (p === 'darwin') {
       if (!existsSync(PLIST_PATH)) { console.error('Service not installed.'); process.exit(1); }
+      const running = spawnSync('launchctl', ['list', LABEL], { encoding: 'utf-8' });
+      if (running.status !== 0) { console.log('Service is not running.'); return; }
       exec(`launchctl unload "${PLIST_PATH}"`);
       console.log('✓ Service stopped');
     } else if (p === 'linux') {
