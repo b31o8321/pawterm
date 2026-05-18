@@ -60,9 +60,10 @@ export function messageToWire(msg: any): any | null {
       // 所以流式消息上需同时检查两者。
       if (msg.isMeta || msg.isSynthetic) return null;
       // harness 注入的系统通知（task 完成、后台事件等），内容是纯 XML 包裹文本，
-      // 没有 isMeta 标记，需要额外过滤。
+      // 没有 isMeta 标记，解析后以 task_notification 类型透传，供客户端渲染提示条。
       const rawContent = msg.message?.content ?? msg.content ?? [];
-      if (isHarnessNotification(rawContent)) return null;
+      const notification = parseHarnessNotification(rawContent);
+      if (notification) return notification;
       return {
         type: 'user',
         content: extractContent(rawContent),
@@ -205,17 +206,38 @@ function normalizeToolResultContent(content: unknown): any {
 }
 
 /**
- * 判断 user message 的 content 是否全部为 harness 注入的系统通知。
- * 这类消息内容为纯 XML 块（<task-notification>、<SYSTEM_NOTIFICATION> 等），
- * 没有 isMeta 标记，需单独过滤，不应在 UI 中展示。
+ * 检测并解析 harness 注入的系统通知（<task-notification> 等 XML 块）。
+ * 返回结构化的 task_notification wire 对象，供客户端渲染提示条；
+ * 若不是系统通知则返回 null。
  */
-function isHarnessNotification(content: unknown): boolean {
-  if (!Array.isArray(content) || content.length === 0) return false;
-  return content.every((b: any) => {
-    if (b?.type !== 'text') return false;
-    const t = (b.text ?? '').trimStart();
-    return t.startsWith('<task-notification>') || t.startsWith('<SYSTEM_NOTIFICATION>');
-  });
+function parseHarnessNotification(content: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(content) || content.length === 0) return null;
+  const texts = (content as any[])
+    .filter((b) => b?.type === 'text')
+    .map((b) => (b.text ?? '') as string);
+  if (texts.length === 0) return null;
+  const full = texts.join('').trim();
+
+  // <task-notification> block
+  const taskMatch = full.match(/<task-notification>([\s\S]*?)<\/task-notification>/);
+  if (taskMatch) {
+    const inner = taskMatch[1];
+    const field = (tag: string) =>
+      inner.match(new RegExp(`<${tag}>(.*?)</${tag}>`, 's'))?.[1]?.trim() ?? null;
+    return {
+      type: 'task_notification',
+      task_id: field('task-id'),
+      status: field('status'),
+      summary: field('summary'),
+    };
+  }
+
+  // <SYSTEM_NOTIFICATION> or other harness XML
+  if (full.startsWith('<SYSTEM_NOTIFICATION>') || full.startsWith('<system_notification>')) {
+    return { type: 'task_notification', task_id: null, status: 'info', summary: full.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() };
+  }
+
+  return null;
 }
 
 function safe(v: unknown): unknown {

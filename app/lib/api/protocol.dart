@@ -107,6 +107,12 @@ abstract class IncomingMessage {
           durationMs: (json['duration_ms'] as num?)?.toInt(),
           timestamp: (json['timestamp'] as num?)?.toInt(),
         );
+      case 'task_notification':
+        return TaskNotificationMsg(
+          taskId: json['task_id'] as String?,
+          status: json['status'] as String?,
+          summary: json['summary'] as String?,
+        );
       default:
         return UnknownMsg(raw: json);
     }
@@ -226,6 +232,18 @@ class PongMsg extends IncomingMessage {}
 class UnknownMsg extends IncomingMessage {
   final Map<String, dynamic> raw;
   UnknownMsg({required this.raw});
+}
+
+/// Harness 注入的后台任务通知（如后台 Agent 完成/失败）。
+/// 由 server/src/serialize.ts 从 XML `<task-notification>` 块解析而来。
+class TaskNotificationMsg extends IncomingMessage {
+  /// 触发本通知的 task_id（Task 工具调用的 tool_use_id）。
+  final String? taskId;
+  /// 任务状态：'completed' | 'killed' | 'failed' | 'info' 等。
+  final String? status;
+  /// 人读摘要，如 "Task completed successfully"。
+  final String? summary;
+  TaskNotificationMsg({this.taskId, this.status, this.summary});
 }
 
 sealed class ContentBlock {

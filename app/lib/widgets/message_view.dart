@@ -186,6 +186,10 @@ class MessageView extends StatelessWidget {
       return _CompactBoundaryLine(message: msg);
     }
 
+    if (msg is TaskNotificationMsg) {
+      return _TaskNotificationChip(message: msg);
+    }
+
     if (msg is ErrorMsg) {
       return Container(
         margin: const EdgeInsets.symmetric(vertical: 6),
@@ -756,6 +760,64 @@ class _CompactBoundaryLine extends StatelessWidget {
   String _fmtK(int n) {
     if (n < 1000) return '$n';
     return '${(n / 1000).toStringAsFixed(n >= 10000 ? 0 : 1)}k';
+  }
+}
+
+/// Harness 注入的后台任务通知（TaskNotificationMsg）渲染：
+/// 居中 chip，带状态图标 + 简短摘要文案。
+/// 颜色语义：completed→success，failed/killed→error，其余→textMuted。
+class _TaskNotificationChip extends StatelessWidget {
+  final TaskNotificationMsg message;
+  const _TaskNotificationChip({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    final status = message.status ?? 'info';
+    final summary = message.summary ?? status;
+
+    final (IconData icon, Color color) = switch (status) {
+      'completed' => (Icons.check_circle_outline, t.success),
+      'failed'    => (Icons.error_outline, t.error),
+      'killed'    => (Icons.cancel_outlined, t.error),
+      _           => (Icons.info_outline, t.textMuted),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Align(
+        alignment: Alignment.center,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 360),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withValues(alpha: 0.25), width: 0.5),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: color),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  summary,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: color,
+                    height: 1.4,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
