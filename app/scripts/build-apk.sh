@@ -165,36 +165,4 @@ echo "  all builds: $VERSION_DIR"
 # Open Finder selecting arm64
 /usr/bin/open -R "$ARM64"
 
-# -------- 8. GitHub Release (optional) --------
-
-echo
-printf "  → create GitHub Release? [y/N]: "
-read -r DO_RELEASE
-if [[ "${DO_RELEASE:-N}" != "y" && "${DO_RELEASE:-N}" != "Y" ]]; then
-  echo "  skipped. (git push and release are separate steps)"
-  exit 0
-fi
-
-TAG="v${VERSION%%+*}"
-ARMEABI="$VERSION_DIR/pawterm-${VERSION}-armeabi-v7a.apk"
-X86_64="$VERSION_DIR/pawterm-${VERSION}-x86_64.apk"
-
-RELEASE_FILES=("$ARM64")
-[[ -f "$ARMEABI" ]] && RELEASE_FILES+=("$ARMEABI")
-[[ -f "$X86_64"  ]] && RELEASE_FILES+=("$X86_64")
-
-# Read server version from server/package.json
-REPO_ROOT="$(dirname "$APP_DIR")"
-SERVER_VERSION=$(python3 -c "import json,sys; print(json.load(open('$REPO_ROOT/server/package.json'))['version'])" 2>/dev/null || echo "")
-RELEASE_TITLE="$TAG"
-[[ -n "$SERVER_VERSION" ]] && RELEASE_TITLE="$TAG  ·  server v$SERVER_VERSION"
-
-echo
-echo "▶ gh release create $TAG  (title: $RELEASE_TITLE)"
-gh release create "$TAG" \
-  "${RELEASE_FILES[@]}" \
-  --title "$RELEASE_TITLE" \
-  --generate-notes
-
-echo
-echo "\033[32m✓ released\033[0m  https://github.com/Airoucat233/pawterm/releases/tag/$TAG"
+echo "  run ./scripts/release.sh to create a GitHub Release."
