@@ -53,17 +53,22 @@ export function messageToWire(msg: any): any | null {
         parent_tool_use_id: msg.parent_tool_use_id ?? null,
       };
 
-    case 'user':
+    case 'user': {
       // isMeta=true（CC 内部字段）或 isSynthetic=true（SDK 流式消息字段）：
       // harness 注入的元消息（如 skill 内容），不应展示给用户。
       // CC 内部使用 isMeta，但 SDK SDKUserMessage 类型将其映射为 isSynthetic，
       // 所以流式消息上需同时检查两者。
       if (msg.isMeta || msg.isSynthetic) return null;
+      // harness 注入的系统通知（task 完成、后台事件等），内容是纯 XML 包裹文本，
+      // 没有 isMeta 标记，需要额外过滤。
+      const rawContent = msg.message?.content ?? msg.content ?? [];
+      if (isHarnessNotification(rawContent)) return null;
       return {
         type: 'user',
-        content: extractContent(msg.message?.content ?? msg.content ?? []),
+        content: extractContent(rawContent),
         parent_tool_use_id: msg.parent_tool_use_id ?? null,
       };
+    }
 
     case 'result':
       return {
@@ -197,6 +202,20 @@ function normalizeToolResultContent(content: unknown): any {
     return safeStringify(content);
   }
   return String(content);
+}
+
+/**
+ * 判断 user message 的 content 是否全部为 harness 注入的系统通知。
+ * 这类消息内容为纯 XML 块（<task-notification>、<SYSTEM_NOTIFICATION> 等），
+ * 没有 isMeta 标记，需单独过滤，不应在 UI 中展示。
+ */
+function isHarnessNotification(content: unknown): boolean {
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every((b: any) => {
+    if (b?.type !== 'text') return false;
+    const t = (b.text ?? '').trimStart();
+    return t.startsWith('<task-notification>') || t.startsWith('<SYSTEM_NOTIFICATION>');
+  });
 }
 
 function safe(v: unknown): unknown {

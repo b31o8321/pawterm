@@ -402,8 +402,13 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
     if (!mounted) return;
-    // preloadedHolder 已消费，清掉避免接管成功后再次触发冲突弹框。
-    unawaited(_connectToSession(httpBase, session.copyWith(preloadedHolder: null)));
+    // 接管成功：直接置 idle 连接态，不再走 _connectToSession 重新查 status。
+    // 重查 status 存在竞态（holder 文件未及时清除），会导致弹框再次弹出。
+    setState(() {
+      _attempting = false;
+      _connected = true;
+      _error = null;
+    });
   }
 
   void _takeoverFromObserve() {
