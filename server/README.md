@@ -1,44 +1,51 @@
-# @cc/server
+# pawterm-server
 
-Fastify + WebSocket bridge between mobile/web clients and local Claude Code.
+> Bridge server for [PawTerm](https://github.com/Airoucat233/pawterm) — lets the Android app control Claude Code on your dev machine.
 
-## 启动
+## Quick start
 
 ```bash
-# 在 workspace 根目录
-pnpm install
-pnpm dev:server   # 等价于 pnpm --filter @cc/server run dev
+npx pawterm-server
 ```
 
-服务监听 `http://0.0.0.0:8765`。
+First run creates `~/.config/pawterm/config.json`. Edit it to add your project paths, then restart.
 
-## 配置
+## Requirements
 
-`config.example.json` → 复制为 `config.json`，编辑允许 App 访问的项目路径。
+- Node 20+
+- [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
 
-## 端点
+## Config
 
-| 路径 | 说明 |
+`~/.config/pawterm/config.json`:
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8765,
+  "permission_mode": "acceptEdits",
+  "projects": [
+    { "name": "my-project", "path": "~/code/my-project" }
+  ]
+}
+```
+
+Override config path: `CC_CONFIG=/path/to/config.json npx pawterm-server`
+
+## Connect
+
+Open PawTerm app → Add connection → `http://<your-machine-ip>:8765`
+
+Over Tailscale: `http://100.x.x.x:8765`
+
+## API endpoints
+
+| Path | Description |
 |---|---|
-| `GET /health` | 健康检查 |
-| `GET /projects` | 项目白名单 |
-| `GET /sessions?cwd=...` | SDK list_sessions |
-| `GET /sessions/:id?cwd=...` | session info |
-| `GET /sessions/:id/messages?cwd=...&limit&offset` | 历史消息 |
-| `POST /sessions/:id/rename?cwd=...&title=...` | 重命名 |
-| `POST /sessions/:id/tag?cwd=...&tag=...` | 标签 |
-| `POST /sessions/:id/fork?cwd=...&title=...` | 分叉 |
-| `DELETE /sessions/:id?cwd=...` | 删除 |
-| `POST /chat/start` | 创建 chat session（返回 sessionId） |
-| `POST /chat/:id/message` | 发送用户消息 |
-| `POST /chat/:id/interrupt` | 中断当前轮 |
-| `POST /chat/:id/set-model` | 切换 model |
-| `POST /chat/:id/set-permission-mode` | 切换 permission mode |
-| `POST /chat/:id/answer-question` | 回答 can_use_tool 询问 |
-| `DELETE /chat/:id` | 关闭 chat session |
-| `GET /chat/:id/events` | SSE 事件流（支持 `Last-Event-ID` 续传） |
-| `WS  /ws/shell` | 终端 PTY 字节流 |
+| `GET /health` | Health check |
+| `GET /projects` | Project whitelist |
+| `GET /sessions?cwd=...` | List sessions |
+| `GET /chat/:id/events` | SSE event stream |
+| `WS  /ws/shell` | PTY byte stream |
 
-## 协议
-
-见 `packages/shared/src/protocol.ts`。
+Full protocol: [`packages/shared/src/protocol.ts`](https://github.com/Airoucat233/pawterm/blob/main/packages/shared/src/protocol.ts)
