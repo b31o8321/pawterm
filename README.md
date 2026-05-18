@@ -21,7 +21,7 @@ Grab the latest `pawterm-*-arm64-v8a.apk` from [**Releases**](../../releases/lat
 
 Requires Node 20+ and `claude` CLI logged in.
 
-**One-off / try it out:**
+**One-off / try it out** (Ctrl+C to stop):
 ```bash
 npx pawterm-server
 ```
