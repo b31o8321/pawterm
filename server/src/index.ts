@@ -18,7 +18,7 @@ import { registerUpload } from './upload.js';
 import { handleShellSocket } from './ws-shell.js';
 
 declare const __SERVER_VERSION__: string;
-const VERSION: string = __SERVER_VERSION__;
+const VERSION: string = typeof __SERVER_VERSION__ !== 'undefined' ? __SERVER_VERSION__ : 'dev';
 
 function getLanIp(): string {
   const ifaces = networkInterfaces();
