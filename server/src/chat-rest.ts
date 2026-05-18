@@ -46,16 +46,18 @@ function cancelGrace(entry: RunEntry): void {
   }
 }
 
-function startGrace(uuid: string, entry: RunEntry): void {
+function startGrace(uuid: string, entry: RunEntry, log?: FastifyInstance['log']): void {
   if (entry.graceTimer) return;
+  log?.info({ uuid, graceMs: GRACE_MS }, 'run: grace started');
   entry.graceTimer = setTimeout(() => {
-    closeRun(uuid);
+    closeRun(uuid, log);
   }, GRACE_MS);
 }
 
-function closeRun(uuid: string): void {
+function closeRun(uuid: string, log?: FastifyInstance['log']): void {
   const entry = activeRuns.get(uuid);
   if (!entry) return;
+  log?.info({ uuid }, 'run: closing (grace expired)');
   cancelGrace(entry);
   entry.askRegistry.rejectAll('run closed');
   // Interrupt first so the SDK subprocess actually stops, then close input gen.
@@ -86,7 +88,7 @@ function maybeSetPendingToolUseId(wire: ReturnType<typeof messageToWire>, regist
   }
 }
 
-async function consumeSdk(uuid: string, entry: RunEntry): Promise<void> {
+async function consumeSdk(uuid: string, entry: RunEntry, log: FastifyInstance['log']): Promise<void> {
   try {
     const iter = entry.session.start();
     for await (const sdkMsg of iter) {
@@ -96,19 +98,22 @@ async function consumeSdk(uuid: string, entry: RunEntry): Promise<void> {
         maybeSetPendingToolUseId(wire, entry.askRegistry);
         broadcast(entry, (wire as { type: string }).type, stamped);
         if ((wire as { type: string }).type === 'result') {
+          log.info({ uuid }, 'run: result received, starting grace');
           entry.resultReceived = true;
-          startGrace(uuid, entry);
+          startGrace(uuid, entry, log);
         }
       }
     }
+    log.info({ uuid }, 'run: SDK iterator exhausted');
   } catch (err) {
+    log.error({ uuid, err: (err as Error).message }, 'run: SDK error');
     broadcast(entry, 'error', { type: 'error', message: (err as Error).message });
     entry.resultReceived = true;
-    startGrace(uuid, entry);
+    startGrace(uuid, entry, log);
   } finally {
     if (!entry.resultReceived) {
       entry.resultReceived = true;
-      startGrace(uuid, entry);
+      startGrace(uuid, entry, log);
     }
   }
 }
@@ -138,18 +143,30 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       if (!isPathAllowed(cwd)) { reply.code(403); return { error: `Project not allowed: ${cwd}` }; }
 
       if (activeRuns.has(uuid)) {
+        const existing = activeRuns.get(uuid)!;
+        if (existing.resultReceived) {
+          // Grace period — previous turn finished, new turn arriving. Reuse the
+          // SDK session (inputGen is still waiting) with a fresh event buffer.
+          req.log.info({ uuid }, 'run: new turn during grace, cancelling grace');
+          cancelGrace(existing);
+          existing.resultReceived = false;
+          existing.buffer = new EventBuffer(2000);
+          existing.session.pushUserMessage(body.text);
+          return { ok: true };
+        }
+        req.log.warn({ uuid }, 'run: 409 — run still active (not in grace)');
         reply.code(409);
         return { error: 'run already active for this session' };
       }
 
       const permissionMode = body.permission_mode ?? settings.permissionMode;
 
-      const existing = await getSessionInfo(uuid, { dir: cwd });
+      const sessionInfo = await getSessionInfo(uuid, { dir: cwd });
       const askRegistry = new AskUserQuestionRegistry();
       const session = new ChatSession({
         cwd,
         permissionMode,
-        ...(existing ? { resume: uuid } : { sessionId: uuid }),
+        ...(sessionInfo ? { resume: uuid } : { sessionId: uuid }),
         model: body.model,
         askRegistry,
       });
@@ -162,9 +179,10 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
         resultReceived: false,
       };
       activeRuns.set(uuid, entry);
+      req.log.info({ uuid, cwd, resume: !!sessionInfo }, 'run: created');
 
       session.pushUserMessage(body.text);
-      consumeSdk(uuid, entry).catch(() => {});
+      consumeSdk(uuid, entry, req.log).catch(() => {});
 
       return { ok: true };
     },
@@ -183,13 +201,19 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       if (!uuid) { reply.code(400); return reply.send({ error: 'uuid required' }); }
 
       const entry = activeRuns.get(uuid);
-      if (!entry) { reply.code(404); return reply.send({ error: 'no active run' }); }
+      if (!entry) {
+        req.log.warn({ uuid }, 'sse: 404 no active run');
+        reply.code(404); return reply.send({ error: 'no active run' });
+      }
 
       const lastIdHeader = (req.headers['last-event-id'] as string | undefined) ?? req.query.lastEventId;
       const lastId = lastIdHeader ? parseInt(lastIdHeader, 10) : 0;
       if (lastId > 0) {
         const probe = entry.buffer.since(lastId);
-        if (probe === null) { reply.code(412); return reply.send({ error: 'event gap, please reload' }); }
+        if (probe === null) {
+          req.log.warn({ uuid, lastId }, 'sse: 412 event gap');
+          reply.code(412); return reply.send({ error: 'event gap, please reload' });
+        }
       }
 
       reply.hijack();
@@ -204,17 +228,21 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       };
       entry.writers.add(writer);
 
+      let replayCount = 0;
       if (lastId > 0) {
         const replay = entry.buffer.since(lastId) ?? [];
+        replayCount = replay.length;
         for (const e of replay) {
           writer.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`);
         }
       } else if (lastId === 0 && entry.buffer.newestId > 0) {
         const all = entry.buffer.since(0) ?? [];
+        replayCount = all.length;
         for (const e of all) {
           writer.write(`id: ${e.id}\nevent: ${e.type}\ndata: ${JSON.stringify(e.data)}\n\n`);
         }
       }
+      req.log.info({ uuid, lastId, replayCount, writers: entry.writers.size }, 'sse: client connected');
 
       const heartbeat = setInterval(() => {
         try {
@@ -228,6 +256,7 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
       req.raw.on('close', () => {
         clearInterval(heartbeat);
         entry.writers.delete(writer);
+        req.log.info({ uuid, writers: entry.writers.size }, 'sse: client disconnected');
       });
 
       return reply;
