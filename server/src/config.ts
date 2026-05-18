@@ -45,7 +45,7 @@ function loadConfig(): ServerSettings {
       console.info(`[config] Created default config at ${configPath}`);
       console.info(`[config] Edit it to add your project paths, then restart.`);
     } catch { /* ignore write errors (e.g. read-only fs) */ }
-    const defaultLogFormat: LogFormat = process.env.NODE_ENV === 'production' ? 'json' : 'pretty';
+    const defaultLogFormat: LogFormat = process.stdout.isTTY ? 'pretty' : 'json';
     return {
       host: defaultConfig.host,
       port: defaultConfig.port,
@@ -67,7 +67,7 @@ function loadConfig(): ServerSettings {
     log_file?: string;
   };
 
-  const defaultLogFormat: LogFormat = process.env.NODE_ENV === 'production' ? 'json' : 'pretty';
+  const defaultLogFormat: LogFormat = process.stdout.isTTY ? 'pretty' : 'json';
 
   return {
     host: raw.host ?? '0.0.0.0',
