@@ -6,7 +6,8 @@
     "pawterm-server": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts/fix-pty-perms.cjs"
   ],
   "scripts": {
     "dev": "CC_CONFIG=$(pwd)/config.json tsx watch src/index.ts",
