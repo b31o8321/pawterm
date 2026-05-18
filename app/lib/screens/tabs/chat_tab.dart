@@ -100,6 +100,9 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   bool _stickToBottom = true;
   static const double _stickToBottomThreshold = 80.0;
 
+  // 键盘弹出跟随：记录上一帧键盘高度，用于判断键盘是否正在弹出。
+  double _prevKeyboardHeight = 0;
+
   // 历史消息反向分页（首屏 50 条，滚到顶取上一页）。
   static const int _historyPageSize = 50;
   static const double _loadMoreThreshold = 200.0;
@@ -180,6 +183,27 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
           _error = null;
         });
       }
+    }
+  }
+
+  /// 键盘弹出时，消息列表"追着"跟上去：延迟 80ms 再做动画，
+  /// 产生轻微的"活力感"；只在用户已经贴底（_stickToBottom）时触发。
+  @override
+  void didChangeMetrics() {
+    final keyboardHeight = WidgetsBinding
+        .instance.platformDispatcher.views.first.viewInsets.bottom;
+    final opening = keyboardHeight > _prevKeyboardHeight;
+    _prevKeyboardHeight = keyboardHeight;
+
+    if (opening && _stickToBottom) {
+      Future.delayed(const Duration(milliseconds: 80), () {
+        if (!mounted || !_scrollController.hasClients) return;
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+        );
+      });
     }
   }
 
