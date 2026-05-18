@@ -363,7 +363,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
             _observeMode = false;
             _observeHolder = null;
           });
-          unawaited(_connectToSession(httpBase, session));
+          // preloadedHolder 已消费，清掉避免再次触发冲突弹框。
+          unawaited(_connectToSession(httpBase, session.copyWith(preloadedHolder: null)));
           return;
         }
       } catch (_) {}
@@ -401,7 +402,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       return;
     }
     if (!mounted) return;
-    unawaited(_connectToSession(httpBase, session));
+    // preloadedHolder 已消费，清掉避免接管成功后再次触发冲突弹框。
+    unawaited(_connectToSession(httpBase, session.copyWith(preloadedHolder: null)));
   }
 
   void _takeoverFromObserve() {
