@@ -5,6 +5,9 @@ dist/
 *.tsbuildinfo
 *.log
 
+# ───── 本地草稿 ─────
+local/
+
 # ───── 环境配置 / 私密 ─────
 .env
 .env.local
