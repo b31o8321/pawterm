@@ -33,13 +33,11 @@ bash app/scripts/release.sh
 ### 服务端 npm 发布
 
 ```bash
-cd server
-npm version patch   # 或 minor / major
-npm run build
-npm publish
+bash server/scripts/publish.sh
 ```
 
-发布后记得 commit `server/package.json` 的版本变更。
+- 交互式选择版本 bump 策略（same / patch / minor / major）
+- 自动更新 `server/package.json`、构建 dist、commit 版本变更、`npm publish`
 
 ---
 
