@@ -94,7 +94,7 @@ async function consumeSdk(uuid: string, entry: RunEntry, log: FastifyInstance['l
     for await (const sdkMsg of iter) {
       const wire = messageToWire(sdkMsg);
       if (wire) {
-        const stamped = { ...wire, timestamp: Date.now() };
+        const stamped = { ...wire, timestamp: Date.now(), uuid: (sdkMsg as any).uuid ?? null };
         maybeSetPendingToolUseId(wire, entry.askRegistry);
         broadcast(entry, (wire as { type: string }).type, stamped);
         if ((wire as { type: string }).type === 'result') {
