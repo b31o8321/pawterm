@@ -34,9 +34,6 @@ function chmodExecRecursive(dir) {
   }
 }
 
-const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
-console.log(`\n✓ pawterm-server@${pkg.version} installed\n`);
-
 const root = findPtyRoot();
 if (!root) {
   process.exit(0);

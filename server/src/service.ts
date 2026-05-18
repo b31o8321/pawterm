@@ -159,6 +159,21 @@ export function runServiceCommand(cmd: string): void {
     return;
   }
 
+  if (cmd === 'restart') {
+    if (p === 'darwin') {
+      if (!existsSync(PLIST_PATH)) { console.error('Service not installed. Run: pawterm-server install'); process.exit(1); }
+      tryExec(`launchctl unload "${PLIST_PATH}"`);
+      exec(`launchctl load "${PLIST_PATH}"`);
+      console.log('✓ Service restarted');
+    } else if (p === 'linux') {
+      exec('systemctl --user restart pawterm-server');
+      console.log('✓ Service restarted');
+    } else {
+      console.error('Unsupported platform.');
+    }
+    return;
+  }
+
   if (cmd === 'status') {
     if (p === 'darwin') {
       const r = spawnSync('launchctl', ['list', LABEL], { encoding: 'utf-8' });
