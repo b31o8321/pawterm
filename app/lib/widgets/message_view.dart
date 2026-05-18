@@ -138,9 +138,9 @@ class MessageView extends StatelessWidget {
         final b = visible[i];
         final content = _renderBlock(context, b);
         final color = _gutterColor(t, b, toolResults);
-        // 相邻两个工具卡片之间用更小的间距（2px），其余保持 6px
+        // 相邻两个工具卡片之间用更小的间距（1px），其余保持 6px
         final nextIsTool = i + 1 < visible.length && visible[i + 1] is ToolUseBlock;
-        final bottomSpacing = (b is ToolUseBlock && nextIsTool) ? 2.0 : 6.0;
+        final bottomSpacing = (b is ToolUseBlock && nextIsTool) ? 1.0 : 6.0;
         final row = _gutterRow(
           context, content, color,
           dotTopOffset: b is ToolUseBlock ? 13.0 : 2.0,

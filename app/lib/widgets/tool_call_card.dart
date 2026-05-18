@@ -56,7 +56,7 @@ class _ToolCallCardState extends State<ToolCallCard> {
       onTap: canExpand ? () => setState(() => _expanded = !_expanded) : null,
       borderRadius: BorderRadius.circular(8),
       child: Padding(
-        padding: const EdgeInsets.only(top: 2, bottom: 4),
+        padding: const EdgeInsets.only(top: 1, bottom: 2),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Container(
