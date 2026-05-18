@@ -54,8 +54,11 @@ export function messageToWire(msg: any): any | null {
       };
 
     case 'user':
-      // isMeta=true：harness 注入的元消息（如 skill 内容），不应展示给用户。
-      if (msg.isMeta) return null;
+      // isMeta=true（CC 内部字段）或 isSynthetic=true（SDK 流式消息字段）：
+      // harness 注入的元消息（如 skill 内容），不应展示给用户。
+      // CC 内部使用 isMeta，但 SDK SDKUserMessage 类型将其映射为 isSynthetic，
+      // 所以流式消息上需同时检查两者。
+      if (msg.isMeta || msg.isSynthetic) return null;
       return {
         type: 'user',
         content: extractContent(msg.message?.content ?? msg.content ?? []),

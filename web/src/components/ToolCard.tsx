@@ -142,7 +142,7 @@ function AskBody({ toolUseId, questions }: { toolUseId: string; questions: AskQu
         <div key={q.question}>
           <p className="text-[13px] font-medium text-text mb-2">{q.question}</p>
           <div className="space-y-1.5">
-            {q.options.map((opt) => (
+            {(q.options ?? []).map((opt) => (
               <button
                 key={opt.label}
                 onClick={() => handleSelect(q.question, opt.label)}
