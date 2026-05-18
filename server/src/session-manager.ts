@@ -125,6 +125,14 @@ export class ChatSession {
     return this.askRegistry.answer(toolUseId, formatAnswers(answers, annotations));
   }
 
+  async getContextUsage(): Promise<unknown> {
+    const iter = this.iter as any;
+    if (!iter?.getContextUsage) {
+      throw new Error('getContextUsage not available - session not started');
+    }
+    return iter.getContextUsage();
+  }
+
   async interrupt(): Promise<void> {
     if (this.iter && (this.iter as any).interrupt) {
       await (this.iter as any).interrupt();

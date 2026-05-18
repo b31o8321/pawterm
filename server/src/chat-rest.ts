@@ -341,6 +341,33 @@ export async function registerChatRest(app: FastifyInstance): Promise<void> {
     return { ok: true };
   });
 
+  /**
+   * GET /chat/context-usage?uuid= — query context window usage for an active run.
+   *
+   * Returns the full SDKControlGetContextUsageResponse:
+   *   { categories, totalTokens, maxTokens, percentage, model, memoryFiles, mcpTools, ... }
+   *
+   * 404 if no active run for uuid.
+   * 503 if the SDK call fails (e.g. session not yet started).
+   */
+  app.get<{ Querystring: { uuid?: string } }>(
+    '/chat/context-usage',
+    async (req, reply) => {
+      const uuid = req.query.uuid;
+      if (!uuid) { reply.code(400); return { error: 'uuid required' }; }
+      const entry = activeRuns.get(uuid);
+      if (!entry) { reply.code(404); return { error: 'no active run' }; }
+      try {
+        const usage = await entry.session.getContextUsage();
+        return usage;
+      } catch (err) {
+        req.log.warn({ uuid, err: (err as Error).message }, 'context-usage: failed');
+        reply.code(503);
+        return { error: (err as Error).message };
+      }
+    },
+  );
+
   /** POST /chat/answer — answer a pending AskUserQuestion tool call. */
   app.post<{ Body: AnswerQuestionRequest }>(
     '/chat/answer',
