@@ -69,6 +69,7 @@ class ChatTab extends ConsumerStatefulWidget {
 class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
   ChatApi? _chatApi;
   SseClient? _sseClient;
+  StreamSubscription<SseEvent>? _sseSub;
   /// Claude session UUID. For new sessions: client-generated and persisted.
   /// For resumed sessions: equals currentSession.resumeId.
   String? _sessionId;
@@ -146,12 +147,19 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     }
   }
 
+  void _closeSse() {
+    _sseSub?.cancel();
+    _sseSub = null;
+    unawaited(_sseClient?.close() ?? Future.value());
+    _sseClient = null;
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _thoughtForTimer?.cancel();
     _observeTimer?.cancel();
-    unawaited(_sseClient?.close() ?? Future.value());
+    _closeSse();
     _textController.dispose();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -164,9 +172,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
       if (_observeMode) return; // observe mode handles its own polling
       // After app comes back to foreground, force reconnect if SSE stream died.
       if (!_connected && _boundKey != null) {
-        unawaited(_sseClient?.close() ?? Future.value());
+        _closeSse();
         setState(() {
-          _sseClient = null;
           _sessionId = null;
           _boundKey = null;
           _error = null;
@@ -191,8 +198,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     if (_attemptedKey == key) return;
 
     // Tear down prior SSE and observe timer before binding to a new session.
-    final priorSse = _sseClient;
-    if (priorSse != null) unawaited(priorSse.close());
+    _closeSse();
     _stopObserveTimer();
 
     _attempting = true;
@@ -429,7 +435,7 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
     final sseUrl = ChatApi(httpBase).eventsUrl(uuid);
     final sse = SseClient(url: sseUrl);
     _sseClient = sse;
-    sse.events.listen(_onSseEvent);
+    _sseSub = sse.events.listen(_onSseEvent);
     unawaited(sse.connect());
   }
 
@@ -596,10 +602,8 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
 
   void _manualReconnect() {
     _stopObserveTimer();
-    final priorSse = _sseClient;
-    if (priorSse != null) unawaited(priorSse.close());
+    _closeSse();
     setState(() {
-      _sseClient = null;
       _sessionId = null;
       _chatApi = null;
       _boundKey = null;
@@ -724,9 +728,12 @@ class _ChatTabState extends ConsumerState<ChatTab> with WidgetsBindingObserver {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _drainQueue();
         });
-        // Turn finished — server will close SSE after grace; proactively disconnect.
+        // Turn finished — cancel subscription and close SSE proactively so the
+        // SseClient's reconnect loop never fires after the server's grace period ends.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
+            _sseSub?.cancel();
+            _sseSub = null;
             unawaited(_sseClient?.close() ?? Future.value());
             setState(() => _sseClient = null);
           }
