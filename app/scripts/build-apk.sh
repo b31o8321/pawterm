@@ -168,25 +168,12 @@ echo "  all builds: $VERSION_DIR"
 # -------- 8. GitHub Release (optional) --------
 
 echo
-printf "  → push & create GitHub Release? [y/N]: "
+printf "  → create GitHub Release? [y/N]: "
 read -r DO_RELEASE
 if [[ "${DO_RELEASE:-N}" != "y" && "${DO_RELEASE:-N}" != "Y" ]]; then
-  echo "  skipped."
+  echo "  skipped. (git push and release are separate steps)"
   exit 0
 fi
-
-REPO_ROOT="$(dirname "$APP_DIR")"
-cd "$REPO_ROOT"
-
-# Commit pubspec changes if version was bumped
-if [[ "$VERSION" != "$CURRENT" ]]; then
-  git add app/pubspec.yaml app/pubspec.lock 2>/dev/null || true
-  git commit -m "chore: bump version to $VERSION" 2>/dev/null || true
-fi
-
-echo
-echo "▶ git push"
-git push
 
 TAG="v${VERSION%%+*}"
 ARMEABI="$VERSION_DIR/pawterm-${VERSION}-armeabi-v7a.apk"
