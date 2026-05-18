@@ -286,7 +286,7 @@ async function main(): Promise<void> {
   });
 }
 
-const SERVICE_CMDS = new Set(['install', 'uninstall', 'start', 'stop', 'restart', 'status']);
+const SERVICE_CMDS = new Set(['install', 'uninstall', 'start', 'stop', 'restart', 'status', 'logs']);
 const subcommand = process.argv[2];
 
 if (subcommand === '--version' || subcommand === '-v') {

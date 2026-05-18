@@ -174,6 +174,16 @@ export function runServiceCommand(cmd: string): void {
     return;
   }
 
+  if (cmd === 'logs') {
+    if (!existsSync(LOG_PATH)) {
+      console.log(`No log file yet: ${LOG_PATH}`);
+      console.log('Start the service first: pawterm-server install');
+      return;
+    }
+    spawnSync('tail', ['-f', LOG_PATH], { stdio: 'inherit' });
+    return;
+  }
+
   if (cmd === 'status') {
     if (p === 'darwin') {
       const r = spawnSync('launchctl', ['list', LABEL], { encoding: 'utf-8' });
