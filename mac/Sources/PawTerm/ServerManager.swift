@@ -1,10 +1,14 @@
 import Foundation
 import Combine
+import AppKit
 
 enum ServerStatus: Equatable {
+    case notInstalled          // pawterm-server not in PATH
+    case nodeNotInstalled      // node also not found
     case stopped
     case starting
     case running
+    case installing(String)    // installing/updating server; payload is status message
     case error(String)
 }
 
@@ -12,11 +16,16 @@ enum ServerStatus: Equatable {
 class ServerManager: ObservableObject {
     @Published var status: ServerStatus = .stopped
     @Published var deviceCount: Int = 0
+    @Published var currentServerVersion: String? = nil
+    @Published var latestServerVersion: String? = nil
+    @Published var updateAvailable: Bool = false
+    @Published var installLog: [String] = []
 
     let port: Int
 
     private var process: Process?
     private var pollTimer: Timer?
+    private var updateCheckTimer: Timer?
     private let config: PawTermConfig
 
     init() {
@@ -28,6 +37,197 @@ class ServerManager: ObservableObject {
     var isRunning: Bool {
         if case .running = status { return true }
         return false
+    }
+
+    // MARK: - Prerequisites Detection
+
+    func detectPrerequisites() async {
+        if findExecutable("node") == nil {
+            status = .nodeNotInstalled
+            return
+        }
+        if findExecutable("pawterm-server") == nil {
+            status = .notInstalled
+            return
+        }
+        // Both exist — let polling determine stopped/running naturally
+        // Only reset to stopped if we're in a "missing" state
+        if case .notInstalled = status { status = .stopped }
+        if case .nodeNotInstalled = status { status = .stopped }
+    }
+
+    // MARK: - Install / Update
+
+    func installServer() async {
+        installLog = []
+        status = .installing("Installing pawterm-server via npm…")
+
+        guard let npmURL = findExecutable("npm") else {
+            status = .error("npm not found. Please install Node.js first.")
+            return
+        }
+
+        let proc = Process()
+        proc.executableURL = npmURL
+        proc.arguments = ["install", "-g", "pawterm-server@latest"]
+        proc.environment = enrichedEnvironment()
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        do {
+            try proc.run()
+        } catch {
+            status = .error("Failed to launch npm: \(error.localizedDescription)")
+            return
+        }
+
+        // Stream stdout
+        Task.detached { [weak self] in
+            let handle = outPipe.fileHandleForReading
+            for try await line in handle.bytes.lines {
+                await MainActor.run {
+                    self?.installLog.append(line)
+                    self?.status = .installing(line)
+                }
+            }
+        }
+
+        // Collect stderr
+        var stderrLines: [String] = []
+        Task.detached {
+            let handle = errPipe.fileHandleForReading
+            for try await line in handle.bytes.lines {
+                stderrLines.append(line)
+            }
+        }
+
+        proc.waitUntilExit()
+        let exitCode = proc.terminationStatus
+
+        if exitCode == 0 {
+            installLog.append("Installation complete.")
+            status = .stopped
+            await start()
+        } else {
+            let stderr = stderrLines.joined(separator: "\n")
+            if stderr.contains("EACCES") || stderr.contains("permission") {
+                status = .error("需要 sudo 权限：在终端运行 sudo npm install -g pawterm-server")
+            } else if stderr.contains("ENOTFOUND") || stderr.contains("network") || stderr.contains("timeout") {
+                status = .error("网络错误，请检查网络后重试")
+            } else {
+                let msg = stderrLines.last ?? "Unknown error (exit \(exitCode))"
+                status = .error("Install failed: \(msg)")
+            }
+        }
+    }
+
+    func updateServer() async {
+        await installServer()
+    }
+
+    // MARK: - Check for Updates
+
+    func checkForUpdates() async {
+        // Get current version
+        if let serverURL = findExecutable("pawterm-server") {
+            let proc = Process()
+            proc.executableURL = serverURL
+            proc.arguments = ["--version"]
+            proc.environment = enrichedEnvironment()
+
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = Pipe()
+
+            if let _ = try? proc.run() {
+                proc.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let raw = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) {
+                    // Strip "pawterm-server " prefix if present
+                    let ver = raw.hasPrefix("pawterm-server ")
+                        ? String(raw.dropFirst("pawterm-server ".count))
+                        : raw
+                    currentServerVersion = ver
+                }
+            }
+        }
+
+        // Fetch latest from npm registry
+        guard let url = URL(string: "https://registry.npmjs.org/pawterm-server/latest") else { return }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let latest = json["version"] as? String {
+                latestServerVersion = latest
+                if let current = currentServerVersion, !current.isEmpty {
+                    updateAvailable = current != latest
+                }
+            }
+        } catch {
+            // Silently ignore network errors during background check
+        }
+    }
+
+    // MARK: - Node Installation
+
+    func installNodeViaHomebrew() async {
+        if findExecutable("brew") == nil {
+            await MainActor.run {
+                NSWorkspace.shared.open(URL(string: "https://nodejs.org/")!)
+            }
+            return
+        }
+
+        let confirmed = await MainActor.run {
+            Alerts.confirm(
+                "Install Node.js via Homebrew",
+                "This will run 'brew install node@20'. It may take a few minutes.",
+                confirmText: "Install"
+            )
+        }
+        guard confirmed else { return }
+
+        status = .installing("Installing Node.js via Homebrew…")
+        installLog = []
+
+        guard let brewURL = findExecutable("brew") else {
+            status = .error("brew not found")
+            return
+        }
+
+        let proc = Process()
+        proc.executableURL = brewURL
+        proc.arguments = ["install", "node@20"]
+        proc.environment = enrichedEnvironment()
+
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = outPipe
+
+        do {
+            try proc.run()
+        } catch {
+            status = .error("Failed to launch brew: \(error.localizedDescription)")
+            return
+        }
+
+        Task.detached { [weak self] in
+            let handle = outPipe.fileHandleForReading
+            for try await line in handle.bytes.lines {
+                await MainActor.run {
+                    self?.installLog.append(line)
+                    self?.status = .installing(line)
+                }
+            }
+        }
+
+        proc.waitUntilExit()
+        await detectPrerequisites()
     }
 
     // MARK: - Control
@@ -44,7 +244,7 @@ class ServerManager: ObservableObject {
         let proc = Process()
         proc.executableURL = execURL
         proc.arguments = []
-        proc.environment = ProcessInfo.processInfo.environment
+        proc.environment = enrichedEnvironment()
 
         let pipe = Pipe()
         proc.standardOutput = pipe
@@ -110,9 +310,22 @@ class ServerManager: ObservableObject {
         }
         // Poll immediately
         Task { await poll() }
+
+        // Check for updates every 30 minutes
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
+            Task { await self?.checkForUpdates() }
+        }
     }
 
     private func poll() async {
+        // Skip polling during install/detect phases
+        switch status {
+        case .installing, .nodeNotInstalled, .notInstalled:
+            return
+        default:
+            break
+        }
+
         let baseURL = "http://127.0.0.1:\(port)"
         let token = config.token
 
@@ -122,7 +335,8 @@ class ServerManager: ObservableObject {
             // Only update to stopped if we didn't spawn it ourselves as starting
             if case .starting = status { return }
             if process == nil {
-                status = .stopped
+                if case .running = status { status = .stopped }
+                if case .error = status { } // keep error
             }
             return
         }
@@ -145,10 +359,11 @@ class ServerManager: ObservableObject {
 
     // MARK: - Helpers
 
-    private func findExecutable(_ name: String) -> URL? {
+    func findExecutable(_ name: String) -> URL? {
         let searchPaths = [
             "/usr/local/bin",
             "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
             "\(NSHomeDirectory())/.npm-global/bin",
             "\(NSHomeDirectory())/.nvm/versions/node/\(nvmCurrentVersion())/bin",
             "/usr/bin",
@@ -176,6 +391,20 @@ class ServerManager: ObservableObject {
         let nvmDir = "\(NSHomeDirectory())/.nvm/versions/node"
         let versions = (try? FileManager.default.contentsOfDirectory(atPath: nvmDir)) ?? []
         return versions.sorted().last ?? "current"
+    }
+
+    private func enrichedEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        // Prepend common bin paths so npm/node/pawterm-server are findable
+        let extraPaths = [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "\(NSHomeDirectory())/.npm-global/bin"
+        ]
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = extraPaths.joined(separator: ":") + ":" + existingPath
+        return env
     }
 }
 
