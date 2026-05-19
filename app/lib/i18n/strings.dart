@@ -195,6 +195,7 @@ class Strings {
   final String qrScanHint;
 
   // Pairing sheet
+  final String pairSheetAutoTab;
   final String pairSheetPinTab;
   final String pairSheetQrTab;
   final String pairSheetPinHint;
@@ -207,6 +208,14 @@ class Strings {
   final String pairSheetConnFailed;
   final String pairSheetAlreadyPaired;
   final String pairSheetPinOpen;
+  // Auto-pair tab
+  final String pairSheetAutoWaiting;
+  final String pairSheetAutoHint;
+  final String pairSheetAutoDenied;
+  final String pairSheetAutoExpired;
+  final String pairSheetAutoNetError;
+  final String pairSheetAutoOldServer;
+  final String pairSheetAutoCancel;
 
   // Add-project sheet
   final String addProjectEmptyDir;
@@ -413,6 +422,7 @@ class Strings {
     required this.lanScanConnectBtn,
     required this.qrScanTitle,
     required this.qrScanHint,
+    required this.pairSheetAutoTab,
     required this.pairSheetPinTab,
     required this.pairSheetQrTab,
     required this.pairSheetPinHint,
@@ -425,6 +435,13 @@ class Strings {
     required this.pairSheetConnFailed,
     required this.pairSheetAlreadyPaired,
     required this.pairSheetPinOpen,
+    required this.pairSheetAutoWaiting,
+    required this.pairSheetAutoHint,
+    required this.pairSheetAutoDenied,
+    required this.pairSheetAutoExpired,
+    required this.pairSheetAutoNetError,
+    required this.pairSheetAutoOldServer,
+    required this.pairSheetAutoCancel,
     required this.addProjectEmptyDir,
     required this.addProjectGoParent,
     required this.addProjectNewFolder,
@@ -622,6 +639,7 @@ const Strings stringsEn = Strings(
   lanScanConnectBtn: 'Connect',
   qrScanTitle: 'Scan QR Code',
   qrScanHint: 'Point at the QR code shown in the server terminal',
+  pairSheetAutoTab: 'Auto',
   pairSheetPinTab: 'Enter PIN',
   pairSheetQrTab: 'Scan QR',
   pairSheetPinHint: 'Run pawterm-server pair on the server, then enter the 6-digit PIN',
@@ -634,6 +652,13 @@ const Strings stringsEn = Strings(
   pairSheetConnFailed: 'Connection failed, check network',
   pairSheetAlreadyPaired: 'Paired',
   pairSheetPinOpen: 'PIN open',
+  pairSheetAutoWaiting: 'Waiting for approval…',
+  pairSheetAutoHint: 'Approve on your computer\'s browser\nwhen the prompt appears',
+  pairSheetAutoDenied: 'The computer denied the pairing request',
+  pairSheetAutoExpired: 'Request timed out, please try again',
+  pairSheetAutoNetError: 'Network error, please retry',
+  pairSheetAutoOldServer: 'Server is too old, use PIN to pair',
+  pairSheetAutoCancel: 'Cancel',
   addProjectEmptyDir: 'Empty directory',
   addProjectGoParent: 'Up',
   addProjectNewFolder: 'New folder',
@@ -834,6 +859,7 @@ const Strings stringsZh = Strings(
   lanScanConnectBtn: '连接',
   qrScanTitle: '扫描二维码',
   qrScanHint: '对准服务端终端中的二维码',
+  pairSheetAutoTab: '自动',
   pairSheetPinTab: '输入 PIN',
   pairSheetQrTab: '扫描 QR',
   pairSheetPinHint: '在服务端运行 pawterm-server pair，然后输入 6 位 PIN',
@@ -846,6 +872,13 @@ const Strings stringsZh = Strings(
   pairSheetConnFailed: '连接失败，请检查网络',
   pairSheetAlreadyPaired: '已配对',
   pairSheetPinOpen: 'PIN 开放',
+  pairSheetAutoWaiting: '等待开发机批准…',
+  pairSheetAutoHint: '在你电脑的浏览器里点"批准"\n批准提示出现时操作',
+  pairSheetAutoDenied: '开发机拒绝了配对请求',
+  pairSheetAutoExpired: '请求超时，请重试',
+  pairSheetAutoNetError: '网络异常，请重试',
+  pairSheetAutoOldServer: '开发机版本太旧，使用 PIN 配对',
+  pairSheetAutoCancel: '取消',
   addProjectEmptyDir: '空目录',
   addProjectGoParent: '上级',
   addProjectNewFolder: '新建',

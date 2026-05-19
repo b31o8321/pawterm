@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -13,7 +14,7 @@ import '../theme.dart';
 import 'qr_scan_screen.dart';
 
 /// Shown when user taps an unpaired server in LAN scan results.
-/// Offers two paths: PIN or QR-claim.
+/// Three pairing paths: Auto (default), PIN, QR-claim.
 class PairSheet extends ConsumerStatefulWidget {
   final LanScanResult server;
 
@@ -28,20 +29,181 @@ class _PairSheetState extends ConsumerState<PairSheet>
   late final TabController _tabCtrl;
   final _pinCtrl = TextEditingController();
   bool _loading = false;
-  String? _errorMsg;
+  String? _errorMsg; // PIN / QR error
+  String? _autoErrorMsg; // Auto-pair error
+
+  // Auto-pair state
+  bool _autoPolling = false;
+  http.Client? _pollClient;
+  bool _cancelled = false;
 
   @override
   void initState() {
     super.initState();
-    _tabCtrl = TabController(length: 2, vsync: this);
+    // 3 tabs: 0=Auto, 1=PIN, 2=QR
+    _tabCtrl = TabController(length: 3, vsync: this);
+    // Kick off auto-pair as soon as sheet is shown.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startAutoPair());
   }
 
   @override
   void dispose() {
+    _cancelled = true;
+    _pollClient?.close();
     _tabCtrl.dispose();
     _pinCtrl.dispose();
     super.dispose();
   }
+
+  // ─── Auto-pair ────────────────────────────────────────────────────────────
+
+  Future<void> _startAutoPair() async {
+    if (!mounted) return;
+    setState(() {
+      _autoPolling = true;
+      _cancelled = false;
+      _autoErrorMsg = null;
+    });
+
+    try {
+      final deviceId = await PairedServersNotifier.getOrCreateDeviceId();
+      final deviceName = PairedServersNotifier.deviceName;
+
+      final resp = await http
+          .post(
+            Uri.parse(
+                'http://${widget.server.host}:${widget.server.port}/pair/request'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'deviceId': deviceId,
+              'deviceName': deviceName,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (!mounted || _cancelled) return;
+
+      if (resp.statusCode == 404) {
+        // Old server — gracefully fall back to PIN tab.
+        final s = ref.read(stringsProvider);
+        setState(() {
+          _autoPolling = false;
+          _autoErrorMsg = s.pairSheetAutoOldServer;
+        });
+        _tabCtrl.animateTo(1); // Switch to PIN tab
+        return;
+      }
+
+      if (resp.statusCode != 200) {
+        final s = ref.read(stringsProvider);
+        setState(() {
+          _autoPolling = false;
+          _autoErrorMsg = s.pairSheetAutoNetError;
+        });
+        return;
+      }
+
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      final pollUrl = body['pollUrl'] as String;
+
+      await _pollLoop(pollUrl);
+    } catch (e) {
+      if (!mounted || _cancelled) return;
+      final s = ref.read(stringsProvider);
+      // 404 comes as ClientException on some platforms; treat unknown as net err
+      setState(() {
+        _autoPolling = false;
+        _autoErrorMsg = s.pairSheetAutoNetError;
+      });
+    }
+  }
+
+  Future<void> _pollLoop(String pollUrl) async {
+    while (mounted && !_cancelled) {
+      _pollClient = http.Client();
+      try {
+        final req = http.Request('GET', Uri.parse(pollUrl));
+        final streamedResp = await _pollClient!
+            .send(req)
+            .timeout(const Duration(seconds: 35));
+
+        final bodyBytes = await streamedResp.stream.toBytes();
+        if (!mounted || _cancelled) return;
+
+        if (streamedResp.statusCode != 200) {
+          final s = ref.read(stringsProvider);
+          setState(() {
+            _autoPolling = false;
+            _autoErrorMsg = s.pairSheetAutoNetError;
+          });
+          return;
+        }
+
+        final body =
+            jsonDecode(utf8.decode(bodyBytes)) as Map<String, dynamic>;
+        final status = body['status'] as String?;
+
+        switch (status) {
+          case 'pending':
+            // Continue polling immediately
+            break;
+          case 'approved':
+            final deviceToken = body['deviceToken'] as String;
+            final serverId =
+                body['serverId'] as String? ?? widget.server.serverId;
+            setState(() => _autoPolling = false);
+            await _savePaired(serverId, deviceToken);
+            return;
+          case 'denied':
+            final s = ref.read(stringsProvider);
+            setState(() {
+              _autoPolling = false;
+              _autoErrorMsg = s.pairSheetAutoDenied;
+            });
+            return;
+          case 'expired':
+            final s = ref.read(stringsProvider);
+            setState(() {
+              _autoPolling = false;
+              _autoErrorMsg = s.pairSheetAutoExpired;
+            });
+            return;
+          default:
+            // Unexpected status — treat as network issue
+            final s = ref.read(stringsProvider);
+            setState(() {
+              _autoPolling = false;
+              _autoErrorMsg = s.pairSheetAutoNetError;
+            });
+            return;
+        }
+      } on TimeoutException {
+        // 35s timeout: server may have dropped the long-poll; just retry
+        if (!mounted || _cancelled) return;
+      } catch (e) {
+        if (!mounted || _cancelled) return;
+        final s = ref.read(stringsProvider);
+        setState(() {
+          _autoPolling = false;
+          _autoErrorMsg = s.pairSheetAutoNetError;
+        });
+        return;
+      } finally {
+        _pollClient?.close();
+        _pollClient = null;
+      }
+    }
+  }
+
+  void _cancelAutoPair() {
+    _cancelled = true;
+    _pollClient?.close();
+    _pollClient = null;
+    setState(() => _autoPolling = false);
+    Navigator.of(context).pop();
+  }
+
+  // ─── PIN pair ─────────────────────────────────────────────────────────────
 
   Future<void> _pairWithPin() async {
     final pin = _pinCtrl.text.trim();
@@ -59,7 +221,8 @@ class _PairSheetState extends ConsumerState<PairSheet>
       final deviceName = PairedServersNotifier.deviceName;
       final resp = await http
           .post(
-            Uri.parse('http://${widget.server.host}:${widget.server.port}/pair/start'),
+            Uri.parse(
+                'http://${widget.server.host}:${widget.server.port}/pair/start'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
               'deviceId': deviceId,
@@ -74,7 +237,8 @@ class _PairSheetState extends ConsumerState<PairSheet>
       final body = jsonDecode(resp.body) as Map<String, dynamic>;
       if (resp.statusCode == 200 && body['ok'] == true) {
         final deviceToken = body['deviceToken'] as String;
-        final serverId = body['serverId'] as String? ?? widget.server.serverId;
+        final serverId =
+            body['serverId'] as String? ?? widget.server.serverId;
         await _savePaired(serverId, deviceToken);
       } else {
         final error = body['error'] as String? ?? 'unknown';
@@ -106,6 +270,8 @@ class _PairSheetState extends ConsumerState<PairSheet>
         return s.pairSheetFailed.replaceAll('{error}', error);
     }
   }
+
+  // ─── QR pair ──────────────────────────────────────────────────────────────
 
   Future<void> _pairWithQr() async {
     final result = await Navigator.of(context).push<PawTermQrResult>(
@@ -147,7 +313,8 @@ class _PairSheetState extends ConsumerState<PairSheet>
         final s = ref.read(stringsProvider);
         setState(() {
           _loading = false;
-          _errorMsg = s.pairSheetFailed.replaceAll('{error}', '${resp.statusCode}');
+          _errorMsg =
+              s.pairSheetFailed.replaceAll('{error}', '${resp.statusCode}');
         });
       }
     } catch (e) {
@@ -160,6 +327,8 @@ class _PairSheetState extends ConsumerState<PairSheet>
     }
   }
 
+  // ─── Shared ───────────────────────────────────────────────────────────────
+
   Future<void> _savePaired(String serverId, String deviceToken) async {
     final server = PairedServer(
       serverId: serverId,
@@ -171,10 +340,10 @@ class _PairSheetState extends ConsumerState<PairSheet>
     );
     await ref.read(pairedServersProvider.notifier).add(server);
     if (!mounted) return;
-    // Pop PairSheet and return PairedServer to LanScanSheet.
-    // LanScanSheet._onTapResult receives this and then pops itself.
     Navigator.of(context).pop(server);
   }
+
+  // ─── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -182,7 +351,8 @@ class _PairSheetState extends ConsumerState<PairSheet>
     final s = ref.watch(stringsProvider);
 
     return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         constraints:
             BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
@@ -230,6 +400,7 @@ class _PairSheetState extends ConsumerState<PairSheet>
               indicatorColor: t.accent,
               indicatorSize: TabBarIndicatorSize.label,
               tabs: [
+                Tab(text: s.pairSheetAutoTab),
                 Tab(text: s.pairSheetPinTab),
                 Tab(text: s.pairSheetQrTab),
               ],
@@ -239,6 +410,17 @@ class _PairSheetState extends ConsumerState<PairSheet>
               child: TabBarView(
                 controller: _tabCtrl,
                 children: [
+                  _AutoTab(
+                    polling: _autoPolling,
+                    errorMsg: _autoErrorMsg,
+                    onCancel: _cancelAutoPair,
+                    onRetry: () {
+                      setState(() => _autoErrorMsg = null);
+                      _startAutoPair();
+                    },
+                    t: t,
+                    s: s,
+                  ),
                   _PinTab(
                     pinCtrl: _pinCtrl,
                     loading: _loading,
@@ -263,6 +445,96 @@ class _PairSheetState extends ConsumerState<PairSheet>
     );
   }
 }
+
+// ─── Auto tab ─────────────────────────────────────────────────────────────────
+
+class _AutoTab extends StatelessWidget {
+  final bool polling;
+  final String? errorMsg;
+  final VoidCallback onCancel;
+  final VoidCallback onRetry;
+  final AppTokens t;
+  final Strings s;
+
+  const _AutoTab({
+    required this.polling,
+    required this.errorMsg,
+    required this.onCancel,
+    required this.onRetry,
+    required this.t,
+    required this.s,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 32, 20, 40),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (polling) ...[
+            SizedBox(
+              width: 48,
+              height: 48,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                color: t.accent,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              s.pairSheetAutoWaiting,
+              style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600, color: t.text),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              s.pairSheetAutoHint,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: t.textMuted, height: 1.5),
+            ),
+            const SizedBox(height: 28),
+            TextButton(
+              onPressed: onCancel,
+              child: Text(
+                s.pairSheetAutoCancel,
+                style: TextStyle(fontSize: 15, color: t.textMuted),
+              ),
+            ),
+          ] else ...[
+            if (errorMsg != null) ...[
+              Icon(Icons.error_outline_rounded, size: 40, color: t.error),
+              const SizedBox(height: 12),
+              Text(
+                errorMsg!,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: t.error, height: 1.5),
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: onRetry,
+                style: FilledButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                ),
+                child: Text(
+                  s.genericRetry,
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ─── PIN tab ──────────────────────────────────────────────────────────────────
 
 class _PinTab extends StatelessWidget {
   final TextEditingController pinCtrl;
@@ -307,7 +579,8 @@ class _PinTab extends StatelessWidget {
             textAlign: TextAlign.center,
             decoration: InputDecoration(
               hintText: '000000',
-              hintStyle: TextStyle(color: t.textDim, letterSpacing: 8, fontSize: 28),
+              hintStyle:
+                  TextStyle(color: t.textDim, letterSpacing: 8, fontSize: 28),
               counterText: '',
             ),
             onSubmitted: (_) => onSubmit(),
@@ -343,6 +616,8 @@ class _PinTab extends StatelessWidget {
     );
   }
 }
+
+// ─── QR tab ───────────────────────────────────────────────────────────────────
 
 class _QrTab extends StatelessWidget {
   final bool loading;
