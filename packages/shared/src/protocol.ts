@@ -7,6 +7,39 @@
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 
+// ============== Health ==============
+
+export interface HealthResponse {
+  status: string;
+  version: string;
+  hostname: string;
+  serverId?: string;
+}
+
+// ============== Pairing ==============
+
+// POST /admin/pair-window — requires adminToken
+export interface PairWindowRequest {}
+export interface PairWindowResponse { pin: string; expiresAt: number }
+
+// POST /pair/start — no auth; PIN is the out-of-band credential
+export interface PairStartRequest { deviceId: string; deviceName: string; pin: string }
+export type PairStartResponse =
+  | { ok: true; deviceToken: string; serverId: string }
+  | { ok: false; error: 'bad_pin' | 'pairing_closed' | 'rate_limited' };
+
+// POST /pair/qr-claim — requires adminToken
+export interface PairQrClaimRequest { deviceId: string; deviceName: string }
+export interface PairQrClaimResponse { deviceToken: string; serverId: string }
+
+// GET /admin/devices — list; DELETE /admin/devices/:id — revoke; requires adminToken
+export interface PairedDevice {
+  deviceId: string;
+  name: string;
+  pairedAt: number;  // epoch ms
+  lastSeen: number | null;
+}
+
 // ============== Chat WebSocket: /ws/session (web admin only) ==============
 // The Flutter app has migrated to REST + SSE. This union type is kept only for
 // the web admin's wsChat.ts until that client is also migrated.
