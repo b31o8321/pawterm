@@ -53,7 +53,7 @@ struct MenuBarContent: View {
         Divider()
 
         Button("About PawTerm…") {
-            NSWorkspace.shared.open(URL(string: "https://github.com/normanzhang/pawterm")!)
+            NSWorkspace.shared.open(URL(string: "https://github.com/Airoucat233/pawterm")!)
         }
 
         Button("Quit") {
