@@ -5,10 +5,13 @@ import Fastify from 'fastify';
 import { createReadStream } from 'node:fs';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { hostname, homedir, networkInterfaces } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
 import QRCode from 'qrcode';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 import type { HealthResponse, Project, PairedDevice } from '@pawterm/shared';
 
@@ -486,18 +489,48 @@ async function main(): Promise<void> {
     return reply;
   });
 
-  // GET /admin — placeholder HTML (web admin will be served here after build)
+  // GET /admin — serve built web admin SPA; fallback placeholder when not built
+  const webDist = resolve(__dirname, '..', '..', 'web', 'dist');
+  const contentType = (p: string): string => {
+    if (p.endsWith('.js')) return 'application/javascript; charset=utf-8';
+    if (p.endsWith('.css')) return 'text/css; charset=utf-8';
+    if (p.endsWith('.html')) return 'text/html; charset=utf-8';
+    if (p.endsWith('.svg')) return 'image/svg+xml';
+    if (p.endsWith('.json')) return 'application/json';
+    if (p.endsWith('.woff2')) return 'font/woff2';
+    return 'application/octet-stream';
+  };
+  const serveStatic = async (relPath: string, reply: import('fastify').FastifyReply) => {
+    const { readFile } = await import('node:fs/promises');
+    const abs = resolve(webDist, relPath);
+    if (!abs.startsWith(webDist)) { reply.code(403).send({ error: 'forbidden' }); return; }
+    try {
+      const buf = await readFile(abs);
+      reply.header('Content-Type', contentType(abs)).send(buf);
+    } catch {
+      reply.code(404).send({ error: 'not found' });
+    }
+  };
+
   app.get('/admin', async (_req, reply) => {
+    const { existsSync } = await import('node:fs');
+    if (existsSync(resolve(webDist, 'admin.html'))) {
+      await serveStatic('admin.html', reply);
+      return;
+    }
     reply
       .header('Content-Type', 'text/html; charset=utf-8')
       .send(
         '<!DOCTYPE html><html><head><meta charset="utf-8"><title>PawTerm Web Admin</title></head>' +
         '<body style="font-family:monospace;padding:2rem;background:#111;color:#eee">' +
         '<h2>🐾 PawTerm Web Admin</h2>' +
-        '<p>Web admin not built yet — run <code>pnpm dev:web</code> separately.</p>' +
+        '<p>Web admin not built yet — run <code>pnpm --filter @cc/web build</code>.</p>' +
         '</body></html>',
       );
   });
+  // Admin SPA assets (Vite emits hashed filenames under /admin/ and /assets/)
+  app.get<{ Params: { '*': string } }>('/admin/*', (req, reply) => serveStatic(join('admin', req.params['*']), reply));
+  app.get<{ Params: { '*': string } }>('/assets/*', (req, reply) => serveStatic(join('assets', req.params['*']), reply));
 
   // ==========================================
 
