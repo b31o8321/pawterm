@@ -1,8 +1,10 @@
-// Skip Aliyun mirrors on CI (GitHub Actions, etc) — they intermittently
-// return 502 from US-based runners and Gradle hard-disables the repo on
-// transient errors instead of falling back. Local dev (CI env unset)
-// still gets mirror-first for China network speed.
-val onCi = System.getenv("CI") != null
+// Skip Aliyun mirrors on CI (GitHub Actions sets CI=true) — they
+// intermittently return 502 from US-based runners and Gradle disables
+// the repo on transient errors instead of falling back. Local dev
+// (CI env unset) still gets mirror-first for China network speed.
+//
+// Note: settings.gradle.kts scopes top-level vals out of {} blocks, so
+// the env check is inlined inside each repositories{} call.
 
 pluginManagement {
     val flutterSdkPath = run {
@@ -16,7 +18,7 @@ pluginManagement {
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
     repositories {
-        if (!onCi) {
+        if (System.getenv("CI") == null) {
             maven { url = uri("https://maven.aliyun.com/repository/public") }
             maven { url = uri("https://maven.aliyun.com/repository/google") }
             maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
@@ -30,7 +32,7 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
     repositories {
-        if (!onCi) {
+        if (System.getenv("CI") == null) {
             maven { url = uri("https://maven.aliyun.com/repository/public") }
             maven { url = uri("https://maven.aliyun.com/repository/google") }
             maven { url = uri("https://maven.aliyun.com/repository/central") }
