@@ -14,6 +14,7 @@ export interface HealthResponse {
   version: string;
   hostname: string;
   serverId?: string;
+  pairingOpen?: boolean;
 }
 
 // ============== Pairing ==============

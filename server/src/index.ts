@@ -77,6 +77,7 @@ async function main(): Promise<void> {
     version: VERSION,
     hostname: hostname(),
     serverId: settings.serverId,
+    pairingOpen: pairingManager.getState() === 'open',
   }));
 
   // REST: projects list
