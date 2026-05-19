@@ -6,12 +6,15 @@ import { createReadStream } from 'node:fs';
 import { mkdir, readdir, stat } from 'node:fs/promises';
 import { hostname, homedir, networkInterfaces } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
+import QRCode from 'qrcode';
 
 import type { HealthResponse, Project, PairedDevice } from '@pawterm/shared';
 
 import { registerChatRest } from './chat-rest.js';
 import { settings, addProject, removeProject, isPathAllowed, ProjectExistsError, configPath, persistPairedDevices } from './config.js';
+import { adminEventBus } from './event-bus.js';
 import { buildLoggerOptions } from './logger.js';
 import { startMdns } from './mdns.js';
 import { pairingManager } from './pair.js';
@@ -43,10 +46,12 @@ async function main(): Promise<void> {
   // Skipped: /health (LAN discovery), /ws/shell (WS auth via init message), /pair/start (PIN is the credential)
   app.addHook('onRequest', async (req, reply) => {
     const url = req.url.split('?')[0];
-    if (url === '/health' || url === '/ws/shell' || url === '/pair/start') return;
+    if (url === '/health' || url === '/ws/shell' || url === '/pair/start' || url === '/pair/request' || url.startsWith('/pair/poll/')) return;
 
     const auth = req.headers['authorization'];
-    const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : null;
+    // Also accept ?token= query param for SSE connections (EventSource can't set headers)
+    const queryToken = (req.query as Record<string, string | undefined>)['token'];
+    const token = (typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : null) ?? queryToken ?? null;
 
     const isAdmin = token === settings.adminToken;
     const matchedDevice = token
@@ -321,7 +326,7 @@ async function main(): Promise<void> {
         reply.code(400);
         return { error: 'missing fields' };
       }
-      const result = await pairingManager.issueDeviceToken(deviceId, deviceName);
+      const result = await pairingManager.issueDeviceTokenAndNotify(deviceId, deviceName);
       return result;
     },
   );
@@ -345,6 +350,153 @@ async function main(): Promise<void> {
       return { error: 'device not found' };
     }
     return { revoked: true };
+  });
+
+  // ==========================================
+  // ======== Slice 8: Web Admin APIs =========
+
+  // GET /admin/qr — adminToken required
+  app.get('/admin/qr', async (_req, _reply) => {
+    const lanIp = getLanIp();
+    const content = `pawterm://${lanIp}:${settings.port}?token=${settings.adminToken}`;
+    const svg = await QRCode.toString(content, { type: 'svg' });
+    return { content, svg };
+  });
+
+  // POST /pair/request — no auth
+  app.post<{ Body: { deviceId: string; deviceName: string } }>(
+    '/pair/request',
+    async (req, reply) => {
+      const { deviceId, deviceName } = req.body ?? {};
+      if (!deviceId || !deviceName) {
+        reply.code(400);
+        return { ok: false, error: 'missing fields' };
+      }
+      const clientIp = req.ip ?? '0.0.0.0';
+      const result = pairingManager.submitRequest(deviceId, deviceName, clientIp);
+      if (!result.ok) {
+        reply.code(result.error === 'rate_limited' ? 429 : 503);
+        return { ok: false, error: result.error };
+      }
+      const requestId = result.request.requestId;
+      return {
+        requestId,
+        pollUrl: `/pair/poll/${requestId}`,
+      };
+    },
+  );
+
+  // GET /pair/poll/:requestId — no auth, long-poll (up to 30s)
+  app.get<{ Params: { requestId: string } }>(
+    '/pair/poll/:requestId',
+    async (req, reply) => {
+      const { requestId } = req.params;
+      const req2 = pairingManager.getRequest(requestId);
+      if (!req2) {
+        reply.code(404);
+        return { error: 'not found' };
+      }
+      const updated = await pairingManager.waitForRequestUpdate(requestId, 30_000);
+      if (!updated) {
+        reply.code(404);
+        return { error: 'not found' };
+      }
+      if (updated.status === 'approved' && updated.deviceToken) {
+        return { status: 'approved', deviceToken: updated.deviceToken, serverId: settings.serverId };
+      }
+      return { status: updated.status };
+    },
+  );
+
+  // POST /admin/pair-approve — adminToken required
+  app.post<{ Body: { requestId: string } }>(
+    '/admin/pair-approve',
+    async (req, reply) => {
+      const { requestId } = req.body ?? {};
+      if (!requestId) {
+        reply.code(400);
+        return { error: 'requestId required' };
+      }
+      const result = await pairingManager.approve(requestId);
+      if (!result) {
+        reply.code(404);
+        return { error: 'request not found or not pending' };
+      }
+      const pairReq = pairingManager.getRequest(requestId)!;
+      return { ok: true, deviceId: pairReq.deviceId, name: pairReq.deviceName };
+    },
+  );
+
+  // POST /admin/pair-deny — adminToken required
+  app.post<{ Body: { requestId: string } }>(
+    '/admin/pair-deny',
+    async (req, reply) => {
+      const { requestId } = req.body ?? {};
+      if (!requestId) {
+        reply.code(400);
+        return { error: 'requestId required' };
+      }
+      const denied = pairingManager.deny(requestId);
+      if (!denied) {
+        reply.code(404);
+        return { error: 'request not found or not pending' };
+      }
+      return { ok: true };
+    },
+  );
+
+  // GET /admin/events — SSE stream; adminToken via Bearer header OR ?token= query
+  app.get('/admin/events', async (req, reply) => {
+    reply
+      .raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+    const sendEvent = (type: string, data: unknown): void => {
+      reply.raw.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Initial snapshot
+    sendEvent('server_status', {
+      type: 'server_status',
+      pairedDevices: settings.pairedDevices.length,
+      activeDevices: 0,
+    });
+
+    // Subscribe to admin events
+    const unsubscribe = adminEventBus.subscribe((event) => {
+      sendEvent(event.type, event);
+    });
+
+    // Keep-alive ping every 20s
+    const keepAlive = setInterval(() => {
+      reply.raw.write(': keep-alive\n\n');
+    }, 20_000);
+
+    // Cleanup on client disconnect
+    req.raw.on('close', () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+
+    // Never resolve — Fastify will manage the raw response
+    return reply;
+  });
+
+  // GET /admin — placeholder HTML (web admin will be served here after build)
+  app.get('/admin', async (_req, reply) => {
+    reply
+      .header('Content-Type', 'text/html; charset=utf-8')
+      .send(
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title>PawTerm Web Admin</title></head>' +
+        '<body style="font-family:monospace;padding:2rem;background:#111;color:#eee">' +
+        '<h2>🐾 PawTerm Web Admin</h2>' +
+        '<p>Web admin not built yet — run <code>pnpm dev:web</code> separately.</p>' +
+        '</body></html>',
+      );
   });
 
   // ==========================================
@@ -377,6 +529,20 @@ async function main(): Promise<void> {
       resolve();
     });
   });
+
+  // Auto-open Web Admin in browser (macOS/Linux only, skip if PAWTERM_NO_OPEN=1)
+  if (process.env.PAWTERM_NO_OPEN !== '1') {
+    const adminUrl = `http://localhost:${settings.port}/admin?token=${settings.adminToken}`;
+    const cmd = process.platform === 'darwin' ? 'open' :
+                process.platform === 'linux' ? 'xdg-open' : null;
+    if (cmd) {
+      try {
+        spawn(cmd, [adminUrl], { detached: true, stdio: 'ignore' }).unref();
+      } catch {
+        // Best-effort: ignore if spawn fails
+      }
+    }
+  }
 
   // Start mDNS advertisement
   const stopMdns = startMdns({

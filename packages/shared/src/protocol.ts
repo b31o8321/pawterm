@@ -41,6 +41,28 @@ export interface PairedDevice {
   lastSeen: number | null;
 }
 
+// GET /admin/qr — requires adminToken
+export interface QrResponse { content: string; svg: string }
+
+// POST /pair/request — no auth
+export interface PairRequestRequest { deviceId: string; deviceName: string }
+export interface PairRequestResponse { requestId: string; pollUrl: string }
+
+// GET /pair/poll/:requestId — no auth, long-poll
+export type PairPollResponse =
+  | { status: 'pending' }
+  | { status: 'approved'; deviceToken: string; serverId: string }
+  | { status: 'denied' | 'expired' };
+
+// GET /admin/events — SSE stream, requires adminToken
+export type AdminEvent =
+  | { type: 'pair_request'; requestId: string; deviceId: string; deviceName: string; ip: string; createdAt: number }
+  | { type: 'device_paired'; deviceId: string; name: string }
+  | { type: 'device_revoked'; deviceId: string }
+  | { type: 'device_connected'; deviceId: string }
+  | { type: 'device_disconnected'; deviceId: string }
+  | { type: 'server_status'; pairedDevices: number; activeDevices: number };
+
 // ============== Chat WebSocket: /ws/session (web admin only) ==============
 // The Flutter app has migrated to REST + SSE. This union type is kept only for
 // the web admin's wsChat.ts until that client is also migrated.
