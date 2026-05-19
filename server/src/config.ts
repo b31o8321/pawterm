@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import type { Project, PermissionMode } from '@pawterm/shared';
 
@@ -14,6 +14,14 @@ const DEFAULT_CONFIG_PATH = resolve(DEFAULT_CONFIG_DIR, 'config.json');
 
 export type LogFormat = 'pretty' | 'json';
 
+export interface StoredDevice {
+  deviceId: string;
+  name: string;
+  deviceToken: string;
+  pairedAt: number;
+  lastSeen: number | null;
+}
+
 export interface ServerSettings {
   host: string;
   port: number;
@@ -22,7 +30,10 @@ export interface ServerSettings {
   logLevel: string;
   logFormat: LogFormat;
   logFile: string | null;
-  token: string;
+  /** Renamed from token; old config.json key "token" still accepted on read */
+  adminToken: string;
+  serverId: string;
+  pairedDevices: StoredDevice[];
 }
 
 function expandHome(p: string): string {
@@ -35,13 +46,16 @@ export const configPath = process.env.PAWTERM_CONFIG ?? process.env.CC_CONFIG ??
 
 function loadConfig(): ServerSettings {
   if (!existsSync(configPath)) {
-    const token = 'sk-' + randomBytes(16).toString('hex');
+    const adminToken = 'sk-' + randomBytes(16).toString('hex');
+    const serverId = randomUUID();
     const defaultConfig = {
       host: '0.0.0.0',
       port: 8765,
       permission_mode: 'bypassPermissions',
       projects: [] as Array<{ name: string; path: string }>,
-      token,
+      token: adminToken,
+      server_id: serverId,
+      paired_devices: [] as StoredDevice[],
     };
     try {
       mkdirSync(DEFAULT_CONFIG_DIR, { recursive: true });
@@ -58,7 +72,9 @@ function loadConfig(): ServerSettings {
       logLevel: process.env.PAWTERM_LOG_LEVEL ?? process.env.CC_LOG_LEVEL ?? 'info',
       logFormat: (process.env.PAWTERM_LOG_FORMAT ?? process.env.CC_LOG_FORMAT ?? defaultLogFormat) as LogFormat,
       logFile: (() => { const p = process.env.PAWTERM_LOG_FILE; return p ? expandHome(p) : null; })(),
-      token,
+      adminToken,
+      serverId,
+      pairedDevices: [],
     };
   }
 
@@ -71,16 +87,44 @@ function loadConfig(): ServerSettings {
     log_format?: LogFormat;
     log_file?: string;
     token?: string;
+    server_id?: string;
+    paired_devices?: Array<{
+      device_id: string;
+      name: string;
+      device_token: string;
+      paired_at: number;
+      last_seen: number | null;
+    }>;
   };
 
-  let token = raw.token as string | undefined;
-  if (!token) {
-    token = 'sk-' + randomBytes(16).toString('hex');
-    const updated: Record<string, unknown> = { ...raw, token };
+  let adminToken = raw.token as string | undefined;
+  let needsWrite = false;
+
+  if (!adminToken) {
+    adminToken = 'sk-' + randomBytes(16).toString('hex');
+    needsWrite = true;
+  }
+
+  let serverId = raw.server_id;
+  if (!serverId) {
+    serverId = randomUUID();
+    needsWrite = true;
+  }
+
+  if (needsWrite) {
+    const updated: Record<string, unknown> = { ...raw, token: adminToken, server_id: serverId };
     writeFileSync(configPath, JSON.stringify(updated, null, 2));
   }
 
   const defaultLogFormat: LogFormat = 'pretty';
+
+  const pairedDevices: StoredDevice[] = (raw.paired_devices ?? []).map((d) => ({
+    deviceId: d.device_id,
+    name: d.name,
+    deviceToken: d.device_token,
+    pairedAt: d.paired_at,
+    lastSeen: d.last_seen,
+  }));
 
   return {
     host: raw.host ?? '0.0.0.0',
@@ -94,7 +138,9 @@ function loadConfig(): ServerSettings {
     logLevel: process.env.PAWTERM_LOG_LEVEL ?? process.env.CC_LOG_LEVEL ?? raw.log_level ?? 'info',
     logFormat: (process.env.PAWTERM_LOG_FORMAT ?? process.env.CC_LOG_FORMAT ?? raw.log_format ?? defaultLogFormat) as LogFormat,
     logFile: (() => { const p = process.env.PAWTERM_LOG_FILE ?? raw.log_file; return p ? expandHome(p) : null; })(),
-    token,
+    adminToken,
+    serverId,
+    pairedDevices,
   };
 }
 
@@ -134,6 +180,20 @@ async function persistProjects(): Promise<void> {
     ? (JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>)
     : { host: settings.host, port: settings.port };
   current['projects'] = settings.projects.map((p) => ({ name: p.name, path: p.path }));
+  await writeFile(configPath, JSON.stringify(current, null, 2));
+}
+
+export async function persistPairedDevices(): Promise<void> {
+  const current: Record<string, unknown> = existsSync(configPath)
+    ? (JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>)
+    : { host: settings.host, port: settings.port };
+  current['paired_devices'] = settings.pairedDevices.map((d) => ({
+    device_id: d.deviceId,
+    name: d.name,
+    device_token: d.deviceToken,
+    paired_at: d.pairedAt,
+    last_seen: d.lastSeen,
+  }));
   await writeFile(configPath, JSON.stringify(current, null, 2));
 }
 
