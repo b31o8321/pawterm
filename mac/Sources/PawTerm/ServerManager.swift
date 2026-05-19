@@ -173,6 +173,32 @@ class ServerManager: ObservableObject {
         }
     }
 
+    // MARK: - Pairing PIN
+
+    /// Open a fresh PIN pairing window on the running server and return the 6-digit PIN.
+    /// Returns nil if the server is unreachable, config has no token, or the server
+    /// is too old to support /admin/pair-window (pre-slice-3).
+    func requestPairWindow() async -> (pin: String, expiresAt: Int)? {
+        guard let cfg = AdminURL.loadConfig(),
+              let url = URL(string: "http://localhost:\(cfg.port)/admin/pair-window") else {
+            return nil
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = "{}".data(using: .utf8)
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let pin = json["pin"] as? String,
+                  let expiresAt = json["expiresAt"] as? Int else { return nil }
+            return (pin, expiresAt)
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Node Installation
 
     func installNodeViaHomebrew() async {

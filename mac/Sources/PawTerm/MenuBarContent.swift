@@ -132,6 +132,9 @@ struct MenuBarContent: View {
             Button("Show QR…") { openAdminQR() }
                 .disabled(!serverManager.isRunning)
 
+            Button("Show PIN…") { showPin() }
+                .disabled(!serverManager.isRunning)
+
             Divider()
 
             if !serverManager.isRunning {
@@ -179,6 +182,23 @@ struct MenuBarContent: View {
         var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)!
         comps.fragment = "qr"
         if let url = comps.url { NSWorkspace.shared.open(url) }
+    }
+
+    private func showPin() {
+        Task {
+            if let res = await serverManager.requestPairWindow() {
+                let spaced = res.pin.map(String.init).joined(separator: " ")
+                Alerts.info(
+                    "配对 PIN",
+                    "\(spaced)\n\n5 分钟内有效。在手机端 PairSheet 输入此 PIN。"
+                )
+            } else {
+                Alerts.info(
+                    "无法获取 PIN",
+                    "Server 未响应或版本过旧（需要 pawterm-server 0.6+）。\n请确认服务端正在运行新版本。"
+                )
+            }
+        }
     }
 
     @MainActor
