@@ -57,9 +57,17 @@ jobs:
           cp "$OUT/app-armeabi-v7a-release.apk" "artifacts/pawterm-${SAFE}-armeabi-v7a.apk" || true
           ls -lh artifacts/
 
+      - name: Compute artifact name
+        id: artifact
+        run: |
+          ref="${GITHUB_REF_NAME//\//-}"
+          ver="${{ steps.app_ver.outputs.ver }}"
+          safe_ver="${ver//+/_}"
+          echo "name=pawterm-apk-${ref}-${safe_ver}" >> "$GITHUB_OUTPUT"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pawterm-apk-${{ github.ref_name }}-${{ steps.app_ver.outputs.ver }}
+          name: ${{ steps.artifact.outputs.name }}
           path: artifacts/*.apk
           retention-days: 14
