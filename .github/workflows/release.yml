@@ -84,6 +84,10 @@ jobs:
   release:
     needs: [build-apk, build-mac]
     runs-on: ubuntu-latest
+    # GITHUB_TOKEN needs explicit write to publish a Release — fork
+    # defaults are read-only as a safety guardrail.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
